@@ -25,25 +25,26 @@ def compute_checksum(header_bytes_without_checksum: bytes, payload_bytes: bytes)
  
  
 def build_packet(node_id: int, layer_id: int, target_layer_id: int,
-                  sequence: int, values: list[float]) -> bytes:
+                  sequence: int, values: list[float], packet_type: int = PACKET_TYPE_DATA) -> bytes:
+    
     source_address = encode_address(node_id, layer_id)
     payload_count = len(values)
     payload_bytes = struct.pack(f">{payload_count}f", *values)
- 
+
     # Pack header with checksum=0 first, to compute the checksum over it
     header_without_checksum = struct.pack(
-        ">HBBBBB", source_address, target_layer_id, PACKET_TYPE_DATA,
+        ">HBBBBB", source_address, target_layer_id, packet_type,
         sequence & 0xFF, payload_count, 0  # 0 = flags placeholder, confirm meaning in your header
     )
     checksum = compute_checksum(header_without_checksum, payload_bytes)
- 
+
     header = struct.pack(
-        HEADER_FMT, source_address, target_layer_id, PACKET_TYPE_DATA,
+        HEADER_FMT, source_address, target_layer_id, packet_type,
         sequence & 0xFF, payload_count, 0, checksum
     )
     return header + payload_bytes
- 
- 
+
+
 def main():
     parser = argparse.ArgumentParser(description="NNAwareBLE-compatible UDP transmitter (no hardware needed)")
     parser.add_argument("--node-id", type=int, required=True, help="This node's ID (0-15)")
@@ -54,6 +55,8 @@ def main():
                               "broadcast address (e.g. 192.168.1.255) to reach real hardware")
     parser.add_argument("--port", type=int, default=4210)
     parser.add_argument("--interval", type=float, default=2.0, help="Seconds between sends")
+    parser.add_argument("--packet-type", type=int, default=PACKET_TYPE_DATA,
+                         help="0=DATA (default), 1=CONTROL, 2=ACK")
     args = parser.parse_args()
  
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -67,7 +70,7 @@ def main():
     try:
         while True:
             packet = build_packet(args.node_id, args.layer_id, args.target_layer_id,
-                                   sequence, [counter])
+                                   sequence, [counter], packet_type=args.packet_type)
             sock.sendto(packet, (args.broadcast_addr, args.port))
             print(f"[transmitter] SENT seq={sequence} value={counter:.2f} "
                   f"({len(packet)} bytes): {packet.hex()}")

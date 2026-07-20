@@ -1,0 +1,171 @@
+{
+  "data_one_float": {
+    "description": "data one float",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 0,
+    "values": [
+      1.0
+    ],
+    "expected_bytes_hex": "11000f00000100e03f800000"
+  },
+  "data_multiple_floats": {
+    "description": "data multiple floats",
+    "generated_via": "transmitter",
+    "node_id": 2,
+    "layer_id": 3,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 10,
+    "values": [
+      1.0,
+      -2.5,
+      3.75
+    ],
+    "expected_bytes_hex": "23000f000a03008e3f800000c020000040700000"
+  },
+  "control_packet": {
+    "description": "control packet",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 1,
+    "sequence": 1,
+    "values": [],
+    "expected_bytes_hex": "11000f0101000022"
+  },
+  "ack_packet": {
+    "description": "ack packet",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 2,
+    "sequence": 1,
+    "values": [
+      1.0
+    ],
+    "expected_bytes_hex": "11000f02010100e33f800000"
+  },
+  "empty_payload_data": {
+    "description": "empty payload data",
+    "generated_via": "transmitter",
+    "node_id": 4,
+    "layer_id": 2,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 3,
+    "values": [],
+    "expected_bytes_hex": "42000f0003000054"
+  },
+  "maximum_payload": {
+    "description": "maximum payload",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 0,
+    "values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0
+    ],
+    "expected_bytes_hex": "11000f0000100037000000003f80000040000000404000004080000040a0000040c0000040e000004100000041100000412000004130000041400000415000004160000041700000"
+  },
+  "sequence_zero": {
+    "description": "sequence zero",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 0,
+    "values": [
+      5.0
+    ],
+    "expected_bytes_hex": "11000f000001000140a00000"
+  },
+  "sequence_255": {
+    "description": "sequence 255",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 255,
+    "values": [
+      5.0
+    ],
+    "expected_bytes_hex": "11000f00ff01000040a00000"
+  },
+  "negative_float": {
+    "description": "negative float",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 0,
+    "values": [
+      -3.14
+    ],
+    "expected_bytes_hex": "11000f00000100e1c048f5c3"
+  },
+  "zero_float": {
+    "description": "zero float",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 0,
+    "values": [
+      0.0
+    ],
+    "expected_bytes_hex": "11000f000001002100000000"
+  },
+  "positive_float": {
+    "description": "positive float",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 0,
+    "values": [
+      7.5
+    ],
+    "expected_bytes_hex": "11000f000001005140f00000"
+  },
+  "non_integer_float": {
+    "description": "non integer float",
+    "generated_via": "transmitter",
+    "node_id": 1,
+    "layer_id": 1,
+    "target_layer_id": 15,
+    "packet_type": 0,
+    "sequence": 0,
+    "values": [
+      3.14159
+    ],
+    "expected_bytes_hex": "11000f000001008940490fd0"
+  }
+}
