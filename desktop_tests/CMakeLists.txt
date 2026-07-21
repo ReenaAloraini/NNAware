@@ -42,3 +42,41 @@ endif()
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_options(protocol_compatibility PRIVATE -static)
 endif()
+
+# ============================================================================
+# Desktop unit/integration tests -- one executable per source header,
+# matching the existing test_address.cpp / test_buffer.cpp naming
+# convention. None of these need nlohmann_json (that's only needed for
+# protocol_compatibility's JSON stdin/stdout interface) -- they link
+# directly against the real headers in src/ and assert their own results.
+# ============================================================================
+
+set(NNAWARE_TEST_SOURCES
+    test_address
+    test_buffer
+    test_node
+    test_node_failure
+    test_packet
+    test_scheduler
+    test_transport
+)
+
+enable_testing()
+
+foreach(test_name ${NNAWARE_TEST_SOURCES})
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${test_name}.cpp)
+        add_executable(${test_name} ${test_name}.cpp)
+        target_include_directories(${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(${test_name} PRIVATE -Wall -Wextra)
+        endif()
+        if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_link_options(${test_name} PRIVATE -static)
+        endif()
+
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    else()
+        message(STATUS "Skipping ${test_name}.cpp -- file not found in ${CMAKE_CURRENT_SOURCE_DIR}")
+    endif()
+endforeach()
