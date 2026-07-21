@@ -12,8 +12,30 @@ struct NNNodeConfig {
     uint8_t  transmitSlot;           // this node's assigned time slot within its layer 
     NNActivationType activationType;
     const float* weights;            // pointer into flash — never copied into RAM
-    const float* backupWeights;      // for fault-tolarence 
+    const float* backupWeights;      // a COPY of backupTargetAddress's own weights (see below) —
+                                       // meaningful only if hasBackupRole is true
     uint8_t  weightCount;
+
+    // --- Backup role (NEW, appended fields): this node ALSO stands ready
+    // to compute on behalf of ONE other node, if that node fails to
+    // transmit in time. Leave hasBackupRole = false (the default) for a
+    // node configured with no backup duty. ---
+    bool      hasBackupRole = false;
+    NNAddress backupTargetAddress{};                // the peer this node backs up
+    uint16_t  backupTargetPredecessorMask = 0;       // THAT peer's own predecessor requirements
+                                                       // (may differ from this node's own predecessorMask)
+    NNActivationType backupTargetActivationType = NNActivationType::LINEAR;
+    uint8_t   backupWeightCount = 0;                  // count for backupWeights above
+    unsigned long resendGraceMs = 0;                  // the ONLY clock-based timing left: after
+                                                        // failure is DETECTED (event-driven, see
+                                                        // layerRosterMask below and NNFailover.h),
+                                                        // how long to wait for a resend reply before
+                                                        // falling back to backup-weight substitution
+    uint16_t  layerRosterMask = 0;                     // every node ID present in THIS node's own
+                                                        // layer (siblings + self) -- lets a backup
+                                                        // detect "the round finished and my target
+                                                        // never went" purely from observed traffic,
+                                                        // with no clock needed for detection itself
 };
 
 class NNNode {
