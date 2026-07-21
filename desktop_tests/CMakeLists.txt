@@ -57,6 +57,7 @@ set(NNAWARE_TEST_SOURCES
     test_node
     test_node_failure
     test_packet
+    test_setup
     test_scheduler
     test_transport
     test_reference_network
