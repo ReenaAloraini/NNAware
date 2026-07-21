@@ -8,6 +8,7 @@ int main() {
     NNNodeConfig cfg{};
     cfg.address = {3, 2, 0, 0};                 // Node D: nodeId=3, layer=2
     cfg.predecessorMask = 0b0000000000000111;   // predecessors 0 (A), 1 (B), 2 (C)
+    cfg.predecessorLayerId = 1;                 // A/B/C all live in layer 1 (see encodeAddress calls below)
     cfg.successorLayerId = 3;
     cfg.activationType = NNActivationType::RELU;
     cfg.weights = weights;

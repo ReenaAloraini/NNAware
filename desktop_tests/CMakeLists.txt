@@ -59,6 +59,8 @@ set(NNAWARE_TEST_SOURCES
     test_packet
     test_scheduler
     test_transport
+    test_reference_network
+    test_cross_layer_collision
 )
 
 enable_testing()
