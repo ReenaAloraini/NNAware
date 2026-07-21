@@ -36,17 +36,37 @@ struct NNNodeConfig {
                                                         // detect "the round finished and my target
                                                         // never went" purely from observed traffic,
                                                         // with no clock needed for detection itself
+
+    // --- Cross-layer collision fix (NEW): NNNode::onPacketReceived matches
+    // predecessors by node ID ONLY -- on a single shared broadcast medium,
+    // without this field, a node ID reused in a DIFFERENT layer could be
+    // silently mistaken for a real predecessor. Explicit, not computed
+    // from address.layerId - 1, for the same reason successorLayerId is
+    // explicit rather than assumed to be address.layerId + 1: a real
+    // per-device config should never rely on an unstated adjacency
+    // assumption holding true elsewhere in the system. ---
+    uint8_t   predecessorLayerId = 0;                  // which layer this node's OWN predecessors
+                                                        // (config.predecessorMask) actually live in
+    uint8_t   backupTargetPredecessorLayerId = 0;       // same idea, for the backup target's
+                                                        // predecessors (backupTargetPredecessorMask) --
+                                                        // meaningful only if hasBackupRole is true
 };
 
 class NNNode {
 public:
     explicit NNNode(const NNNodeConfig& cfg) : config(cfg), hasExecuted(false), outputValue(0.0f) {}
 
-    // Called whenever a packet arrives 
-    // Extracts the payload and stores it into this node's input buffer, keyed by sender.
+    // Called whenever a packet arrives.
+    // FIX: now filters by the sender's layer BEFORE matching by node ID.
+    // Previously matched by node ID alone -- on a single shared broadcast
+    // medium, a node ID reused in a different layer (e.g. a Layer-0 input
+    // node sharing an ID with a Layer-1 node) could be silently mistaken
+    // for a real predecessor, corrupting the weighted sum with the wrong
+    // sender's value. See NNNodeConfig::predecessorLayerId above.
     void onPacketReceived(const NNPacket& pkt) {
-        uint8_t senderNodeId = decodeAddress(pkt.header.sourceAddress).nodeId;
-        inputBuffer.storeInput(senderNodeId, pkt.payload, pkt.header.payloadCount);
+        NNAddress src = decodeAddress(pkt.header.sourceAddress);
+        if (src.layerId != config.predecessorLayerId) return;  // NEW: reject cross-layer collision
+        inputBuffer.storeInput(src.nodeId, pkt.payload, pkt.header.payloadCount);
     }
 
     bool readyToExecute() const {
