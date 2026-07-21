@@ -93,7 +93,14 @@ public:
             layerObservedMask |= (uint16_t(1) << src.nodeId);
         }
 
-        if (cfg.backupTargetPredecessorMask & (uint16_t(1) << src.nodeId)) {
+        // FIX (mirrors the identical fix in NNNode::onPacketReceived):
+        // filter by the sender's layer BEFORE matching by node ID. Without
+        // this, a node ID reused in a different layer than
+        // backupTargetPredecessorLayerId could be mistaken for one of the
+        // backup target's real predecessors, corrupting the substitute
+        // computation with the wrong sender's value.
+        if (src.layerId == cfg.backupTargetPredecessorLayerId &&
+            (cfg.backupTargetPredecessorMask & (uint16_t(1) << src.nodeId))) {
             inputBuffer.storeInput(src.nodeId, pkt.payload, pkt.header.payloadCount);
         }
     }
@@ -328,3 +335,64 @@ public:
 private:
     uint16_t lockedMask = 0;
 };
+
+// --- Desktop-only backup-config validation (see top-of-file note) ---------
+
+struct NNBackupConfigValidationResult {
+    static constexpr uint8_t MAX_ISSUES = 8;
+
+    bool isValid = true;
+    const char* issues[MAX_ISSUES] = {};
+    uint8_t issueCount = 0;
+
+    void addIssue(const char* msg) {
+        isValid = false;
+        if (issueCount < MAX_ISSUES) {
+            issues[issueCount++] = msg;
+        }
+        // If MAX_ISSUES is exceeded, isValid still correctly reports
+        // false — only the LISTING of every individual issue is capped,
+        // never the overall validity verdict.
+    }
+};
+
+// Confirms a backup node's copy of its target's identity/activation/
+// predecessor/weight-count information genuinely matches the target's
+// REAL, independently-authored NNNodeConfig. Returns every mismatch
+// found, not just the first — useful for a desktop tool reporting a full
+// diagnosis at once, and for testing each failure mode independently.
+inline NNBackupConfigValidationResult validateBackupConfig(
+    const NNNodeConfig& backupCfg, const NNNodeConfig& targetRealCfg) {
+
+    NNBackupConfigValidationResult result;
+
+    if (!backupCfg.hasBackupRole) {
+        result.addIssue("backupCfg.hasBackupRole is false -- nothing to validate");
+        return result;  // every other field is meaningless if this is false
+    }
+
+    if (backupCfg.backupTargetAddress.nodeId != targetRealCfg.address.nodeId ||
+        backupCfg.backupTargetAddress.layerId != targetRealCfg.address.layerId ||
+        backupCfg.backupTargetAddress.clusterId != targetRealCfg.address.clusterId) {
+        result.addIssue("backupTargetAddress does not match targetRealCfg.address");
+    }
+
+    if (backupCfg.backupTargetAddress.layerId != backupCfg.address.layerId) {
+        result.addIssue("backupTargetAddress is not in the SAME layer as this node's own "
+                         "address -- backup must be a per-layer, sibling-to-sibling relationship");
+    }
+
+    if (backupCfg.backupTargetActivationType != targetRealCfg.activationType) {
+        result.addIssue("backupTargetActivationType does not match the target's REAL activationType");
+    }
+
+    if (backupCfg.backupTargetPredecessorMask != targetRealCfg.predecessorMask) {
+        result.addIssue("backupTargetPredecessorMask does not match the target's REAL predecessorMask");
+    }
+
+    if (backupCfg.backupWeightCount != targetRealCfg.weightCount) {
+        result.addIssue("backupWeightCount does not match the target's REAL weightCount");
+    }
+
+    return result;
+}
