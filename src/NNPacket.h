@@ -7,9 +7,17 @@
 constexpr uint8_t NN_MAX_PAYLOAD_FLOATS = 16;
 
 enum class NNPacketType : uint8_t {
-    DATA    = 0,  // carries a node's activation output(s)
-    CONTROL = 1,  // for scheduling/sync messages
-    ACK     = 2,   // reserved for a future reliability layer
+    DATA     = 0,  // carries a node's activation output(s)
+    CONTROL  = 1,  // for scheduling/sync messages
+    ACK      = 2,   // reserved for a future reliability layer
+    TEARDOWN = 3,  // RESERVED, not yet dispatched by any current logic
+                    // (deferred by explicit decision until after the framework's
+                    // UI is built). Intended meaning, for when it is wired up:
+                    // broadcast when a layer cannot recover via backup weights +
+                    // retransmission (e.g. a node AND its designated backup have
+                    // both failed), signaling receivers to abort the current
+                    // inference pass rather than hang or produce a wrong result.
+                    // See NNFailover.h -- NNBackupStandby::resolveWithNoRecovery().
 };
 
 struct NNPacketHeader {
