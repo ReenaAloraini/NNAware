@@ -7,20 +7,34 @@ optionally a backup role + backup weights, see NNFailover.h), verify the
 result, and finally tell everyone to go live. Drives the exact opcode
 sequence implemented by NNSetupAgent in src/NNSetupProtocol.h.
 
-Usage:
+Usage (static -- a pre-generated devices.json, exact hardwareId per role):
     python setup_tool.py --config devices.json
     python setup_tool.py --config devices.json --broadcast-addr 192.168.1.255
     python setup_tool.py --config devices.json --dry-run --dump-hex
 
+Usage (dynamic -- assign roles from a pool AFTER seeing who actually
+responds, skipping any pool device that never answers HELLO instead of
+failing outright; see generate_manifest.py for network.json/
+hardware_ids.json's schema):
+    python setup_tool.py --network network.json --hardware-ids hardware_ids.json --broadcast-addr 192.168.1.255
+
+The dynamic mode's skip-if-unavailable behavior applies ONLY here, during
+initial setup-phase role assignment -- it has nothing to do with, and
+does not replace, a device's own runtime backupRole/NNFailover mechanism
+for handling a peer that goes offline AFTER the network is already
+RUNNING.
+
 See device_manifest.py for the devices.json schema.
 """
 import argparse
+import json
 import socket
 import time
 
 import setup_messages
 import wire_format
-from device_manifest import load_manifest, ManifestError
+from device_manifest import load_manifest, parse_devices, ManifestError
+from generate_manifest import build_devices, GenerateError
 
 
 def build_device_packets(device: dict, seq_start: int):
@@ -183,9 +197,17 @@ def discover(sock, manifest_hw_ids: set, hello_window: float) -> set:
     return seen
 
 
+def _load_hardware_ids(path: str) -> list:
+    with open(path) as f:
+        raw_ids = json.load(f)
+    return [int(h, 16) if isinstance(h, str) else int(h) for h in raw_ids]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", required=True, help="Path to the device manifest JSON file")
+    parser.add_argument("--config", help="Path to a pre-generated device manifest JSON file (static assignment)")
+    parser.add_argument("--network", help="Path to a network.json (dynamic assignment -- use with --hardware-ids)")
+    parser.add_argument("--hardware-ids", help="Path to hardware_ids.json (dynamic assignment -- use with --network)")
     parser.add_argument("--broadcast-addr", default="255.255.255.255",
                          help="Use 255.255.255.255 for same-machine testing, or the real subnet "
                               "broadcast address (e.g. 192.168.1.255) to reach real hardware")
@@ -201,13 +223,47 @@ def main():
                               "against deserializePacket()/NNSetupAgent in a C++ test harness)")
     args = parser.parse_args()
 
-    try:
-        devices = load_manifest(args.config)
-    except (ManifestError, OSError) as e:
-        print(f"[setup] ERROR loading manifest: {e}")
+    dynamic = args.network is not None or args.hardware_ids is not None
+    if args.config and dynamic:
+        print("[setup] ERROR: use either --config, or --network/--hardware-ids, not both")
+        return 1
+    if dynamic and not (args.network and args.hardware_ids):
+        print("[setup] ERROR: dynamic assignment requires BOTH --network and --hardware-ids")
+        return 1
+    if not args.config and not dynamic:
+        print("[setup] ERROR: must pass --config (static manifest), or --network/--hardware-ids (dynamic pool)")
         return 1
 
+    if dynamic:
+        try:
+            hardware_ids = _load_hardware_ids(args.hardware_ids)
+            with open(args.network) as f:
+                network = json.load(f)
+        except OSError as e:
+            print(f"[setup] ERROR loading network/hardware-ids: {e}")
+            return 1
+        total_nodes = sum(layer["nodes"] for layer in network["layers"])
+    else:
+        try:
+            devices = load_manifest(args.config)
+        except (ManifestError, OSError) as e:
+            print(f"[setup] ERROR loading manifest: {e}")
+            return 1
+
     if args.dry_run:
+        if dynamic:
+            # No discovery in a dry-run (no socket at all) -- just take the
+            # first total_nodes of the pool, in order, same convention as
+            # generate_manifest.py's own static assignment.
+            if total_nodes > len(hardware_ids):
+                print(f"[setup] ERROR: network needs {total_nodes} node(s) but the pool "
+                      f"only has {len(hardware_ids)} hardware ID(s)")
+                return 1
+            try:
+                devices = parse_devices(build_devices(network, hardware_ids[:total_nodes]))
+            except GenerateError as e:
+                print(f"[setup] ERROR: {e}")
+                return 1
         for device in devices:
             hw_id = device["hardwareId"]
             print(f"[setup] (dry-run) device 0x{hw_id:016X}:")
@@ -225,8 +281,24 @@ def main():
     sock.bind(("", args.port))
     target_addr = (args.broadcast_addr, args.port)
 
-    manifest_hw_ids = {d["hardwareId"] for d in devices}
-    discover(sock, manifest_hw_ids, args.hello_window)
+    if dynamic:
+        seen = discover(sock, set(hardware_ids), args.hello_window)
+        available = [hw for hw in hardware_ids if hw in seen]
+        if len(available) < total_nodes:
+            print(f"[setup] ERROR: network needs {total_nodes} available device(s) but only "
+                  f"{len(available)}/{len(hardware_ids)} pool device(s) responded to HELLO -- "
+                  f"power on more devices (or shrink the network) and re-run")
+            return 1
+        print(f"[setup] {len(available)}/{len(hardware_ids)} pool device(s) available -- "
+              f"assigning the first {total_nodes} (in pool order) to network roles")
+        try:
+            devices = parse_devices(build_devices(network, available[:total_nodes]))
+        except GenerateError as e:
+            print(f"[setup] ERROR: {e}")
+            return 1
+    else:
+        manifest_hw_ids = {d["hardwareId"] for d in devices}
+        discover(sock, manifest_hw_ids, args.hello_window)
 
     results = {}
     for device in devices:

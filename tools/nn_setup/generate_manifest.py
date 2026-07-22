@@ -50,14 +50,19 @@ test_reference_network.cpp).
 
 hardware_ids.json is just a flat pool of physical devices' hardwareId
 values -- written ONCE to match whatever NN_HARDWARE_ID you flashed into
-each device's .ino, never edited again. Must contain EXACTLY as many
-entries as sum(layer["nodes"] for layer in layers) -- inputSize does NOT
-count, since the input feed is not a physical device.
+each device's .ino, never edited again. It may hold MORE entries than
+sum(layer["nodes"] for layer in layers) -- e.g. you own 5 devices but
+today's test network only needs 3 -- in which case only the first N
+(matching node count) are used and the rest sit idle in the pool. It is
+an error only if the network needs MORE hardware nodes than the pool
+has, since inputSize does NOT count (the input feed is not a physical
+device) and there is nothing left to assign.
 
 Hardware IDs are assigned to nodes in order, walking network.json's
 layers/nodes flattened front-to-back (layer 0 node 0 first, then layer 0
 node 1, ..., then layer 1 node 0, ...) against hardware_ids.json in the
-order given there.
+order given there -- the front of the pool is used first, so if you care
+WHICH physical devices sit idle, put those last in hardware_ids.json.
 
 Positional/topology fields are derived as follows (see NNNode.h /
 NNScheduler.h for how the device side actually consumes them). Hardware
@@ -94,11 +99,11 @@ def build_devices(network: dict, hardware_ids: list) -> list:
     layers = network["layers"]
 
     total_nodes = sum(layer["nodes"] for layer in layers)
-    if total_nodes != len(hardware_ids):
+    if total_nodes > len(hardware_ids):
         raise GenerateError(
             f"network.json defines {total_nodes} hardware node(s) (across its 'layers', "
-            f"not counting inputSize) but hardware_ids.json has {len(hardware_ids)} "
-            f"hardware ID(s) -- they must match exactly"
+            f"not counting inputSize) but hardware_ids.json only has {len(hardware_ids)} "
+            f"hardware ID(s) -- add more physical devices to the pool, or shrink the network"
         )
 
     for layer_index, layer in enumerate(layers):

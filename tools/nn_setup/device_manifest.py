@@ -72,10 +72,14 @@ def _address_value(addr, context: str) -> int:
     return encode_address(addr["nodeId"], addr["layerId"], addr["clusterId"], addr["reserved"])
 
 
-def load_manifest(path: str) -> list:
-    with open(path, "r") as f:
-        raw = json.load(f)
-
+def parse_devices(raw: list) -> list:
+    """
+    Validates and encodes an already-loaded manifest (a plain Python list of
+    device dicts, e.g. straight out of generate_manifest.build_devices() --
+    no disk round-trip required) into the wire-ready device dicts
+    setup_tool.py's provisioning loop expects. load_manifest() below is just
+    this plus a JSON file read.
+    """
     if not isinstance(raw, list):
         raise ManifestError("manifest must be a JSON array of device objects")
 
@@ -138,3 +142,9 @@ def load_manifest(path: str) -> list:
         devices.append(device)
 
     return devices
+
+
+def load_manifest(path: str) -> list:
+    with open(path, "r") as f:
+        raw = json.load(f)
+    return parse_devices(raw)
