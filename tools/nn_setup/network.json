@@ -1,0 +1,23 @@
+{
+  "inputSize": 2,
+  "layers": [
+    {
+      "nodes": 3,
+      "activationType": "RELU",
+      "weights": [
+        [0.5, 1.0],
+        [-1.0, 2.0],
+        [0.3, -0.6]
+      ],
+      "backups": {"0": 1, "1": 0},
+      "resendGraceMs": 50
+    },
+    {
+      "nodes": 1,
+      "activationType": "SIGMOID",
+      "weights": [
+        [2.0, -0.5, 0.7]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+[
+  {
+    "hardwareId": "0x0000000000000001",
+    "address": {
+      "nodeId": 0,
+      "layerId": 1,
+      "clusterId": 0,
+      "reserved": 0
+    },
+    "predecessorMask": 3,
+    "precedingSiblingsMask": 0,
+    "successorLayerId": 2,
+    "transmitSlot": 0,
+    "activationType": "RELU",
+    "weights": [
+      0.5,
+      1.0
+    ],
+    "predecessorLayerId": 0,
+    "backupRole": {
+      "backupTargetAddress": {
+        "nodeId": 1,
+        "layerId": 1,
+        "clusterId": 0,
+        "reserved": 0
+      },
+      "backupTargetPredecessorMask": 3,
+      "backupTargetActivationType": "RELU",
+      "backupWeights": [
+        -1.0,
+        2.0
+      ],
+      "resendGraceMs": 50,
+      "layerRosterMask": 7,
+      "backupTargetPredecessorLayerId": 0
+    }
+  },
+  {
+    "hardwareId": "0x0000000000000002",
+    "address": {
+      "nodeId": 1,
+      "layerId": 1,
+      "clusterId": 0,
+      "reserved": 0
+    },
+    "predecessorMask": 3,
+    "precedingSiblingsMask": 1,
+    "successorLayerId": 2,
+    "transmitSlot": 1,
+    "activationType": "RELU",
+    "weights": [
+      -1.0,
+      2.0
+    ],
+    "predecessorLayerId": 0,
+    "backupRole": {
+      "backupTargetAddress": {
+        "nodeId": 0,
+        "layerId": 1,
+        "clusterId": 0,
+        "reserved": 0
+      },
+      "backupTargetPredecessorMask": 3,
+      "backupTargetActivationType": "RELU",
+      "backupWeights": [
+        0.5,
+        1.0
+      ],
+      "resendGraceMs": 50,
+      "layerRosterMask": 7,
+      "backupTargetPredecessorLayerId": 0
+    }
+  },
+  {
+    "hardwareId": "0x0000000000000003",
+    "address": {
+      "nodeId": 2,
+      "layerId": 1,
+      "clusterId": 0,
+      "reserved": 0
+    },
+    "predecessorMask": 3,
+    "precedingSiblingsMask": 3,
+    "successorLayerId": 2,
+    "transmitSlot": 2,
+    "activationType": "RELU",
+    "weights": [
+      0.3,
+      -0.6
+    ],
+    "predecessorLayerId": 0
+  },
+  {
+    "hardwareId": "0x0000000000000004",
+    "address": {
+      "nodeId": 0,
+      "layerId": 2,
+      "clusterId": 0,
+      "reserved": 0
+    },
+    "predecessorMask": 7,
+    "precedingSiblingsMask": 0,
+    "successorLayerId": 3,
+    "transmitSlot": 0,
+    "activationType": "SIGMOID",
+    "weights": [
+      2.0,
+      -0.5,
+      0.7
+    ],
+    "predecessorLayerId": 1
+  }
+]
