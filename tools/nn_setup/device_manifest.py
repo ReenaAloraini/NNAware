@@ -15,6 +15,7 @@ Manifest shape: a JSON array of device objects, one per physical device:
     "activationType": "RELU",
     "weights": [0.1, -0.2, 0.3],
     "predecessorLayerId": 0,
+    "bias": -1.5,
     "backupRole": {
       "backupTargetAddress": {"nodeId": 1, "layerId": 1, "clusterId": 0, "reserved": 0},
       "backupTargetPredecessorMask": 3,
@@ -22,7 +23,8 @@ Manifest shape: a JSON array of device objects, one per physical device:
       "backupWeights": [0.15, -0.25],
       "resendGraceMs": 50,
       "layerRosterMask": 7,
-      "backupTargetPredecessorLayerId": 0
+      "backupTargetPredecessorLayerId": 0,
+      "backupTargetBias": -1.5
     }
   }
 ]
@@ -31,6 +33,15 @@ Manifest shape: a JSON array of device objects, one per physical device:
 provisioned with no backup duty (NNNodeConfig::hasBackupRole stays false,
 its own default), matching NNSetupAgent's behavior of never sending
 BACKUP_ROLE_INFO/BACKUP_WEIGHTS_CHUNK to such a device.
+
+PATCHED: "bias" is now a recognized top-level device field, and
+"backupTargetBias" is now a recognized backupRole field -- both mirror the
+same additions to NNNodeConfig in NNNode.h. Both are OPTIONAL and default
+to 0.0 when absent, matching NNNodeConfig::bias's own default in NNNode.h
+-- required-with-no-default would reject every manifest/generator written
+before this field existed (confirmed: it broke tools/nn_setup's own
+generate_manifest.py output). A manifest that needs a real bias sets it
+explicitly; one that doesn't is unaffected.
 """
 import json
 
@@ -42,11 +53,13 @@ REQUIRED_DEVICE_FIELDS = [
     "hardwareId", "address", "predecessorMask", "precedingSiblingsMask",
     "successorLayerId", "transmitSlot", "activationType", "weights",
     "predecessorLayerId",  # which layer predecessorMask's node IDs live in (NNNodeConfig cross-layer fix)
+    # "bias" deliberately NOT required -- optional, defaults to 0.0 (see module docstring).
 ]
 REQUIRED_ADDRESS_FIELDS = ["nodeId", "layerId", "clusterId", "reserved"]
 REQUIRED_BACKUP_FIELDS = [
     "backupTargetAddress", "backupTargetPredecessorMask", "backupTargetActivationType",
     "backupWeights", "resendGraceMs", "layerRosterMask", "backupTargetPredecessorLayerId",
+    # "backupTargetBias" deliberately NOT required -- optional, defaults to 0.0 (see module docstring).
 ]
 
 
@@ -107,6 +120,7 @@ def parse_devices(raw: list) -> list:
             "activationType": _activation_value(entry["activationType"], context),
             "weights": [float(w) for w in entry["weights"]],
             "predecessorLayerId": entry["predecessorLayerId"],
+            "bias": float(entry.get("bias", 0.0)),
             "backupRole": None,
         }
 
@@ -137,6 +151,7 @@ def parse_devices(raw: list) -> list:
                 "resendGraceMs": backup["resendGraceMs"],
                 "layerRosterMask": backup["layerRosterMask"],
                 "backupTargetPredecessorLayerId": backup["backupTargetPredecessorLayerId"],
+                "backupTargetBias": float(backup.get("backupTargetBias", 0.0)),
             }
 
         devices.append(device)
