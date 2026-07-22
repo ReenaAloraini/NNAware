@@ -13,6 +13,10 @@ Usage:
     python setup_tool.py --config devices.json --dry-run --dump-hex
 
 See device_manifest.py for the devices.json schema.
+
+PATCHED: build_device_packets() now passes device["bias"] into
+pack_topology_info() and backup["backupTargetBias"] into
+pack_backup_role_info(), matching both functions' new parameters.
 """
 import argparse
 import socket
@@ -45,7 +49,7 @@ def build_device_packets(device: dict, seq_start: int):
     emit(setup_messages.TOPOLOGY_INFO, setup_messages.pack_topology_info(
         hw_id, device["predecessorMask"], device["precedingSiblingsMask"],
         device["successorLayerId"], device["activationType"], len(device["weights"]),
-        device["transmitSlot"], device["predecessorLayerId"]))
+        device["transmitSlot"], device["predecessorLayerId"], device["bias"]))
 
     backup = device["backupRole"]
     if backup is not None:
@@ -53,7 +57,7 @@ def build_device_packets(device: dict, seq_start: int):
             hw_id, backup["backupTargetAddress"], backup["backupTargetPredecessorMask"],
             backup["layerRosterMask"], backup["backupTargetActivationType"],
             len(backup["backupWeights"]), backup["resendGraceMs"],
-            backup["backupTargetPredecessorLayerId"]))
+            backup["backupTargetPredecessorLayerId"], backup["backupTargetBias"]))
 
     for opcode, values in ((setup_messages.WEIGHTS_CHUNK, device["weights"]),
                            (setup_messages.BACKUP_WEIGHTS_CHUNK, backup["backupWeights"] if backup else None)):
@@ -254,3 +258,4 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

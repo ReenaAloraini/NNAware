@@ -7,6 +7,10 @@ equivalent struct bytes (NOT wire bytes -- pass the result to
 wire_format.build_packet() before sending). Each unpack_* function takes
 the already word-reversed-back struct bytes that wire_format.parse_packet()
 hands back.
+
+PATCHED: pack_topology_info() gained a `bias` parameter and
+pack_backup_role_info() gained a `backup_target_bias` parameter, mirroring
+NNTopologyInfoMsg/NNBackupRoleInfoMsg's new fields in NNSetupProtocol.h.
 """
 import struct
 
@@ -68,10 +72,12 @@ def pack_assign_address(hardware_id: int, address: int) -> bytes:
 
 def pack_topology_info(hardware_id: int, predecessor_mask: int, preceding_siblings_mask: int,
                         successor_layer_id: int, activation_type: int, weight_count: int,
-                        transmit_slot: int, predecessor_layer_id: int) -> bytes:
-    return struct.pack("<QHHBBBBB3x", hardware_id, predecessor_mask, preceding_siblings_mask,
+                        transmit_slot: int, predecessor_layer_id: int, bias: float) -> bytes:
+    # Field order must match NNTopologyInfoMsg exactly: ...predecessorLayerId,
+    # THEN bias, THEN the 3-byte pad -- see NNSetupProtocol.h.
+    return struct.pack("<QHHBBBBBf3x", hardware_id, predecessor_mask, preceding_siblings_mask,
                         successor_layer_id, activation_type, weight_count, transmit_slot,
-                        predecessor_layer_id)
+                        predecessor_layer_id, bias)
 
 
 def pack_weights_chunk(hardware_id: int, chunk_index: int, chunk_count: int, values) -> bytes:
@@ -86,10 +92,13 @@ def pack_weights_chunk(hardware_id: int, chunk_index: int, chunk_count: int, val
 def pack_backup_role_info(hardware_id: int, backup_target_address: int,
                            backup_target_predecessor_mask: int, layer_roster_mask: int,
                            backup_target_activation_type: int, backup_weight_count: int,
-                           resend_grace_ms: int, backup_target_predecessor_layer_id: int) -> bytes:
-    return struct.pack("<QHHHBBIB3x", hardware_id, backup_target_address, backup_target_predecessor_mask,
+                           resend_grace_ms: int, backup_target_predecessor_layer_id: int,
+                           backup_target_bias: float) -> bytes:
+    # Field order must match NNBackupRoleInfoMsg exactly: ...backupTargetPredecessorLayerId,
+    # THEN backupTargetBias, THEN the 3-byte pad -- see NNSetupProtocol.h.
+    return struct.pack("<QHHHBBIBf3x", hardware_id, backup_target_address, backup_target_predecessor_mask,
                         layer_roster_mask, backup_target_activation_type, backup_weight_count,
-                        resend_grace_ms, backup_target_predecessor_layer_id)
+                        resend_grace_ms, backup_target_predecessor_layer_id, backup_target_bias)
 
 
 def pack_commit_request(hardware_id: int) -> bytes:
