@@ -21,12 +21,21 @@ network.json shape:
         [0.5, 1.0],          // previous layer's width (inputSize for the
         [-1.0, 2.0],         // first layer) -- like nn.Linear's in_features
         [0.3, -0.6]
-      ]
+      ],
+      "bias": [-1.5, 0.0, 2.0]   // OPTIONAL, one value per node (like
+                                  // nn.Linear's own bias vector). Omit the
+                                  // whole key, or an individual layer's key,
+                                  // to default every node in that layer to
+                                  // 0.0 -- mirrors device_manifest.py's own
+                                  // optional/default-0.0 handling of "bias",
+                                  // so networks written before this field
+                                  // existed still generate unchanged.
     },
     {
       "nodes": 1,
       "activationType": "SIGMOID",
       "weights": [[2.0, -0.5, 0.7]]
+      // no "bias" here -- defaults to [0.0] for this layer's 1 node
     }
   ]
 }
@@ -40,13 +49,13 @@ maps backer node index -> target node index it stands in for (here: node
 project's own reference-network pattern). A node absent from the keys
 has no backup duty. Every OTHER backup field (backupTargetAddress,
 backupTargetPredecessorMask/PredecessorLayerId, backupTargetActivationType,
-backupWeights, layerRosterMask) is derived automatically, since siblings
-in one layer always share the same predecessors/activation, and the
-target's weights are just that target's own "weights" row looked up by
-index. The one thing that ISN'T derivable -- resendGraceMs, how long to
-wait for a resend before falling back to the substitute -- can be set
-per layer via "resendGraceMs" (defaults to 50, matching
-test_reference_network.cpp).
+backupWeights, backupTargetBias, layerRosterMask) is derived automatically,
+since siblings in one layer always share the same predecessors/activation,
+and the target's weights/bias are just that target's own "weights"/"bias"
+entry looked up by index. The one thing that ISN'T derivable --
+resendGraceMs, how long to wait for a resend before falling back to the
+substitute -- can be set per layer via "resendGraceMs" (defaults to 50,
+matching test_reference_network.cpp).
 
 hardware_ids.json is just a flat pool of physical devices' hardwareId
 values -- written ONCE to match whatever NN_HARDWARE_ID you flashed into
@@ -81,6 +90,8 @@ convention:
   - successorLayerId: next layer's layerId, even for the last layer --
     no device is ever addressed there, so the extra broadcast target is
     inert
+  - bias: this node's own "bias" entry, or 0.0 if the layer omits "bias"
+    entirely (PATCHED -- see network.json shape above)
 
 Usage:
     python generate_manifest.py
@@ -121,6 +132,14 @@ def build_devices(network: dict, hardware_ids: list) -> list:
                     f"{' == inputSize' if layer_index == 0 else ''})"
                 )
 
+        # PATCHED: "bias" is optional per layer; when present it must have
+        # exactly one entry per node, same shape rule as "weights".
+        if "bias" in layer and len(layer["bias"]) != layer["nodes"]:
+            raise GenerateError(
+                f"layers[{layer_index}]: 'nodes' is {layer['nodes']} but 'bias' has "
+                f"{len(layer['bias'])} value(s) -- one bias value is required per node if given at all"
+            )
+
         for backer_key, target_id in layer.get("backups", {}).items():
             backer_id = int(backer_key)
             if not (0 <= backer_id < layer["nodes"]) or not (0 <= target_id < layer["nodes"]):
@@ -143,6 +162,8 @@ def build_devices(network: dict, hardware_ids: list) -> list:
         layer_roster_mask = (1 << layer["nodes"]) - 1
         resend_grace_ms = layer.get("resendGraceMs", 50)
         backups = {int(k): v for k, v in layer.get("backups", {}).items()}
+        # PATCHED: defaults every node in the layer to 0.0 bias if "bias" is absent.
+        layer_bias = layer.get("bias", [0.0] * layer["nodes"])
 
         for node_id, weights in enumerate(layer["weights"]):
             device = {
@@ -155,6 +176,7 @@ def build_devices(network: dict, hardware_ids: list) -> list:
                 "activationType": layer["activationType"],
                 "weights": weights,
                 "predecessorLayerId": predecessor_layer_id,
+                "bias": layer_bias[node_id],  # PATCHED
             }
 
             if node_id in backups:
@@ -167,6 +189,7 @@ def build_devices(network: dict, hardware_ids: list) -> list:
                     "resendGraceMs": resend_grace_ms,
                     "layerRosterMask": layer_roster_mask,
                     "backupTargetPredecessorLayerId": predecessor_layer_id,
+                    "backupTargetBias": layer_bias[target_id],  # PATCHED
                 }
 
             devices.append(device)
