@@ -91,6 +91,19 @@ def test_devices_json_schema():
     assert output_device["successorLayerId"] == codegen.NN_TERMINAL_LAYER_SENTINEL  # 255, not 0
 
 
+def test_network_json_schema():
+    model = model_io.load_model(FIXTURE)
+    net = codegen.model_to_network_json(model)
+    assert net["inputSize"] == 2
+    assert len(net["layers"]) == 1  # only the compute layer -- input layer isn't in "layers"
+    layer = net["layers"][0]
+    assert layer["nodes"] == 1
+    assert layer["activationType"] == "RELU"
+    assert layer["weights"] == [[1.0, 1.0]]
+    assert layer["bias"] == [-1.5]
+    assert "backups" not in layer  # v1 scope: no automatic backup-pair generation
+
+
 def test_codegen_cpp_header():
     nodes = _build()
     output_header = codegen.to_cpp_header(nodes[1][0])
@@ -110,5 +123,6 @@ if __name__ == "__main__":
     test_devices_json_requires_hardware_ids()
     test_assign_hardware_ids_skips_virtual_inputs()
     test_devices_json_schema()
+    test_network_json_schema()
     test_codegen_cpp_header()
     print("All tests passed.")
