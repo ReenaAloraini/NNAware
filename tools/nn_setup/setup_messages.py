@@ -26,12 +26,13 @@ NACK = 0x08
 START = 0x09
 BACKUP_ROLE_INFO = 0x0A
 BACKUP_WEIGHTS_CHUNK = 0x0B
+INPUT_VALUE = 0x0C  # laptop -> device: push a seed input value (predecessorMask==0 devices only)
 
 OPCODE_NAMES = {
     HELLO: "HELLO", ASSIGN_ADDRESS: "ASSIGN_ADDRESS", TOPOLOGY_INFO: "TOPOLOGY_INFO",
     WEIGHTS_CHUNK: "WEIGHTS_CHUNK", COMMIT_REQUEST: "COMMIT_REQUEST", COMMIT_REPLY: "COMMIT_REPLY",
     ACK: "ACK", NACK: "NACK", START: "START", BACKUP_ROLE_INFO: "BACKUP_ROLE_INFO",
-    BACKUP_WEIGHTS_CHUNK: "BACKUP_WEIGHTS_CHUNK",
+    BACKUP_WEIGHTS_CHUNK: "BACKUP_WEIGHTS_CHUNK", INPUT_VALUE: "INPUT_VALUE",
 }
 
 START_MAGIC = 0x4E4E5354  # 'NNST', matches NNStartMsg's default
@@ -99,6 +100,11 @@ def pack_backup_role_info(hardware_id: int, backup_target_address: int,
     return struct.pack("<QHHHBBIBf3x", hardware_id, backup_target_address, backup_target_predecessor_mask,
                         layer_roster_mask, backup_target_activation_type, backup_weight_count,
                         resend_grace_ms, backup_target_predecessor_layer_id, backup_target_bias)
+
+
+def pack_input_value(hardware_id: int, value: float) -> bytes:
+    """Mirrors NNInputValueMsg exactly: hardwareId, then value, no padding needed (12 bytes = 3 words)."""
+    return struct.pack("<Qf", hardware_id, value)
 
 
 def pack_commit_request(hardware_id: int) -> bytes:

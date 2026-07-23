@@ -1,4 +1,5 @@
 #include<cassert>
+#include<cstdio>
 #include"NNScheduler.h"
 
 int main() {
@@ -28,5 +29,48 @@ int main() {
     assert(schedA.hasOutputReady(out));
     assert(schedA.getState() == NNNodeState::TRANSMITTED);
 
+    // A predecessorMask==0 node seeded externally (node.seedOutput(), e.g. a
+    // real physical input-layer device) sets hasExecuted=true BEFORE the
+    // scheduler ever ticks -- readyToExecute() (!hasExecuted && ...) is then
+    // false forever, so the normal WAITING_FOR_INPUT->READY_TO_EXECUTE path
+    // above can never fire for it. notifySeeded() is the bridge: it must
+    // skip straight to WAITING_FOR_TURN so the existing turn-taking/transmit
+    // machinery still runs unmodified from there.
+    NNNodeConfig cfgB{};
+    cfgB.address = {1, 0, 0, 0};   // Node B: nodeId=1, layer=0 (a second input-layer sibling)
+    cfgB.predecessorMask = 0;
+    cfgB.weightCount = 0;
+    cfgB.activationType = NNActivationType::LINEAR;
+    NNNode nodeB(cfgB);
+
+    NNWindowConfig winB{};
+    winB.ownLayerId = 0;
+    winB.precedingSiblingsMask = 0b1;  // must observe sibling nodeId 0 transmit first
+
+    NNScheduler schedB(nodeB, winB);
+    nodeB.seedOutput(3.5f);
+    schedB.notifySeeded();
+    assert(schedB.getState() == NNNodeState::WAITING_FOR_TURN);
+
+    schedB.tick();  // sibling 0 hasn't been observed yet -- still waiting
+    assert(schedB.getState() == NNNodeState::WAITING_FOR_TURN);
+
+    NNPacket siblingPkt{};
+    siblingPkt.header.sourceAddress = encodeAddress({0, 0, 0, 0});
+    schedB.onPacketObserved(siblingPkt);
+    schedB.tick();
+    assert(schedB.getState() == NNNodeState::READY_TO_TRANSMIT);
+
+    NNPacket outB;
+    assert(schedB.hasOutputReady(outB));
+    assert(outB.payload[0] == 3.5f);
+    assert(schedB.getState() == NNNodeState::TRANSMITTED);
+
+    // notifySeeded() must be a no-op once already past WAITING_FOR_INPUT --
+    // calling it again (e.g. a stray duplicate call) must not rewind state.
+    schedB.notifySeeded();
+    assert(schedB.getState() == NNNodeState::TRANSMITTED);
+
+    printf("ALL SCHEDULER TESTS PASSED\n");
     return 0;
 }

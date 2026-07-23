@@ -444,6 +444,85 @@ int main() {
         printf("TEST 7 PASSED: a START packet with the wrong magic is ignored\n");
     }
 
+    // --- TEST 8: INPUT_VALUE pushes a seed value independent of bias, ACKed
+    //             like any other setup message, readable via the new accessors ---
+    {
+        NNTransportLoopback transport;
+        TestConfigStore store;
+        NNSetupAgent agent(HW_ID, transport, store);
+        agent.begin();
+        assert(!agent.hasSeedInputValue());
+
+        NNAddress addr{0, 0, 0, 0}; // a real physical input-layer device: layer 0
+        NNPacket assignPkt{};
+        NNAssignAddressMsg assignMsg{HW_ID, encodeAddress(addr), 0};
+        packSetupMessage(assignPkt, NNSetupOpcode::ASSIGN_ADDRESS, assignMsg, 1);
+        agent.onSetupPacket(assignPkt);
+        drain(transport);
+
+        NNInputValueMsg inputMsg{HW_ID, 2.75f};
+        NNPacket inputPkt{};
+        packSetupMessage(inputPkt, NNSetupOpcode::INPUT_VALUE, inputMsg, 2);
+        agent.onSetupPacket(inputPkt);
+        NNPacket ack = drain(transport);
+        assert(getSetupOpcode(ack) == NNSetupOpcode::ACK);
+        assert(unpackSetupMessage<NNAckMsg>(ack).ackedOpcode == static_cast<uint8_t>(NNSetupOpcode::INPUT_VALUE));
+        assert(agent.hasSeedInputValue());
+        assert(agent.getInputValue() == 2.75f);
+
+        // A foreign hardwareId must be ignored, exactly like every other opcode.
+        NNInputValueMsg foreignMsg{OTHER_HW_ID, 99.0f};
+        NNPacket foreignPkt{};
+        packSetupMessage(foreignPkt, NNSetupOpcode::INPUT_VALUE, foreignMsg, 3);
+        agent.onSetupPacket(foreignPkt);
+        NNPacket unused{};
+        assert(!transport.receive(unused)); // no ACK, no state change
+        assert(agent.getInputValue() == 2.75f); // untouched
+
+        printf("TEST 8 PASSED: INPUT_VALUE is ACKed and readable independent of bias/weights\n");
+    }
+
+    // --- TEST 9: a weightCount==0 device (predecessorMask==0, e.g. a real
+    //             physical input-layer node) reaches VERIFYING/CONFIGURED
+    //             from TOPOLOGY_INFO alone, with NO WEIGHTS_CHUNK ever sent ---
+    {
+        NNTransportLoopback transport;
+        TestConfigStore store;
+        NNSetupAgent agent(HW_ID, transport, store);
+        agent.begin();
+
+        NNAddress addr{0, 0, 0, 0};
+        NNPacket assignPkt{};
+        NNAssignAddressMsg assignMsg{HW_ID, encodeAddress(addr), 0};
+        packSetupMessage(assignPkt, NNSetupOpcode::ASSIGN_ADDRESS, assignMsg, 1);
+        agent.onSetupPacket(assignPkt);
+        drain(transport);
+
+        NNTopologyInfoMsg topoMsg{HW_ID, /*predecessorMask=*/0, /*precedingSiblingsMask=*/0,
+                                   /*successorLayerId=*/1, static_cast<uint8_t>(NNActivationType::LINEAR),
+                                   /*weightCount=*/0, /*transmitSlot=*/0, /*predecessorLayerId=*/0, /*bias=*/0.0f};
+        NNPacket topoPkt{};
+        packSetupMessage(topoPkt, NNSetupOpcode::TOPOLOGY_INFO, topoMsg, 2);
+        agent.onSetupPacket(topoPkt);
+        NNPacket ack = drain(transport);
+        assert(getSetupOpcode(ack) == NNSetupOpcode::ACK);
+        // No WEIGHTS_CHUNK ever sent -- state must already be VERIFYING, not
+        // stuck in RECEIVING_CONFIG waiting for a chunk that will never come.
+        assert(agent.getState() == NNSetupState::VERIFYING);
+
+        NNCommitRequestMsg commitReq{HW_ID};
+        NNPacket commitPkt{};
+        packSetupMessage(commitPkt, NNSetupOpcode::COMMIT_REQUEST, commitReq, 3);
+        agent.onSetupPacket(commitPkt);
+        NNPacket reply = drain(transport);
+        auto replyMsg = unpackSetupMessage<NNCommitReplyMsg>(reply);
+        assert(replyMsg.success == 1);
+        assert(replyMsg.computedChecksum == 0); // checksum over zero bytes
+        assert(agent.getState() == NNSetupState::CONFIGURED);
+
+        printf("TEST 9 PASSED: a weightCount==0 device reaches CONFIGURED with no WEIGHTS_CHUNK\n");
+    }
+
     printf("\nALL SETUP PROTOCOL TESTS PASSED\n");
     return 0;
 }

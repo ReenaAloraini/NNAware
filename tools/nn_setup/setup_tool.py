@@ -75,13 +75,25 @@ def build_device_packets(device: dict, seq_start: int):
 
     for opcode, values in ((setup_messages.WEIGHTS_CHUNK, device["weights"]),
                            (setup_messages.BACKUP_WEIGHTS_CHUNK, backup["backupWeights"] if backup else None)):
-        if values is None:
+        # A zero-weight device (predecessorMask==0, e.g. a real physical
+        # input-layer node) has expectedChunkCount==0 device-side -- sending a
+        # chunk anyway (even an empty one) would carry chunkIndex 0, which is
+        # already out of range and gets NACKed. Send no chunks at all; the
+        # device advances past RECEIVING_CONFIG on its own once TOPOLOGY_INFO
+        # lands (see NNSetupAgent::handleTopologyInfo's own maybeAdvanceToVerifying() call).
+        if not values:
             continue
         chunk_count = max(1, -(-len(values) // setup_messages.NN_WEIGHTS_CHUNK_MAX_FLOATS))
         for chunk_index in range(chunk_count):
             start = chunk_index * setup_messages.NN_WEIGHTS_CHUNK_MAX_FLOATS
             chunk_values = values[start:start + setup_messages.NN_WEIGHTS_CHUNK_MAX_FLOATS]
             emit(opcode, setup_messages.pack_weights_chunk(hw_id, chunk_index, chunk_count, chunk_values))
+
+    # OPTIONAL -- only present for a predecessorMask==0 device (a real physical
+    # input-layer node). Independent of weights/topology verification, so it
+    # can go anywhere before COMMIT_REQUEST; sent here, right after weights.
+    if device.get("inputValue") is not None:
+        emit(setup_messages.INPUT_VALUE, setup_messages.pack_input_value(hw_id, device["inputValue"]))
 
     emit(setup_messages.COMMIT_REQUEST, setup_messages.pack_commit_request(hw_id))
     return packets

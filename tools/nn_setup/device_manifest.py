@@ -42,6 +42,14 @@ to 0.0 when absent, matching NNNodeConfig::bias's own default in NNNode.h
 before this field existed (confirmed: it broke tools/nn_setup's own
 generate_manifest.py output). A manifest that needs a real bias sets it
 explicitly; one that doesn't is unaffected.
+
+PATCHED: "inputValue" is now a recognized OPTIONAL top-level device field,
+present only for a predecessorMask==0 device (a real physical input-layer
+node) -- setup_tool.py sends it as a dedicated INPUT_VALUE setup message,
+deliberately separate from "bias" (see NNSetupProtocol.h's NNInputValueMsg).
+Absent for every other device; no default is applied here since setup_tool.py
+itself only emits the packet when the key is present (None/absent both mean
+"don't send it").
 """
 import json
 
@@ -121,6 +129,7 @@ def parse_devices(raw: list) -> list:
             "weights": [float(w) for w in entry["weights"]],
             "predecessorLayerId": entry["predecessorLayerId"],
             "bias": float(entry.get("bias", 0.0)),
+            "inputValue": float(entry["inputValue"]) if entry.get("inputValue") is not None else None,
             "backupRole": None,
         }
 

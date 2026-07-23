@@ -66,6 +66,15 @@ enum class NNSetupOpcode : uint8_t {
     // default). See NNFailover.h / NNBackupStandby for what these fields feed.
     BACKUP_ROLE_INFO     = 0x0A, // laptop -> device: assign backup duty + its scalar fields
     BACKUP_WEIGHTS_CHUNK = 0x0B, // laptop -> device: partial backupWeights array (reuses NNWeightsChunkMsg's layout -- only the opcode routes it to a different destination array)
+
+    // OPTIONAL -- only ever sent to a device with predecessorMask==0 (a real
+    // physical input-layer node, e.g. a sensor board). Pushes the raw value
+    // that device should seed into the network once RUNNING (via
+    // NNNode::seedOutput()), deliberately independent of NNNodeConfig::bias --
+    // bias and "the input reading" are different concepts even though a
+    // LINEAR-activation, zero-predecessor node would numerically pass either
+    // straight through. Devices with predecessorMask!=0 never receive this.
+    INPUT_VALUE = 0x0C, // laptop -> device: push a seed input value
 };
 
 // 12 bytes of chunk header (hardwareId + 3 index bytes + 1 pad) + 11 floats
@@ -135,6 +144,13 @@ struct NNBackupRoleInfoMsg {
     uint8_t  backupTargetPredecessorLayerId; // which layer backupTargetPredecessorMask's node IDs live in
     float    backupTargetBias;            // NEW -- mirrors NNNodeConfig::backupTargetBias (NNNode.h)
     uint8_t  _reserved[3] = {0, 0, 0};       // pads to a whole number of 4-byte words (28 bytes total)
+};
+
+// OPTIONAL -- only sent to a predecessorMask==0 device. Already a whole
+// number of 4-byte words (12 bytes = 3 words), no padding needed.
+struct NNInputValueMsg {
+    uint64_t hardwareId;
+    float    value;
 };
 
 struct NNCommitRequestMsg {
@@ -284,6 +300,12 @@ public:
     const NNNodeConfig& getNodeConfig() const { return nodeConfig; }
     const NNWindowConfig& getWindowConfig() const { return windowConfig; }
 
+    // Only meaningful for a predecessorMask==0 device (see INPUT_VALUE above).
+    // hasSeedInputValue() stays false for every other device, since they're
+    // never sent this opcode at all.
+    float getInputValue() const { return pendingInputValue; }
+    bool hasSeedInputValue() const { return hasInputValue; }
+
     // Call for every received packet with header.type == CONTROL.
     void onSetupPacket(const NNPacket& pkt) {
         switch (getSetupOpcode(pkt)) {
@@ -292,6 +314,7 @@ public:
             case NNSetupOpcode::WEIGHTS_CHUNK:        handleWeightsChunk(pkt); break;
             case NNSetupOpcode::BACKUP_ROLE_INFO:      handleBackupRoleInfo(pkt); break;
             case NNSetupOpcode::BACKUP_WEIGHTS_CHUNK:  handleBackupWeightsChunk(pkt); break;
+            case NNSetupOpcode::INPUT_VALUE:           handleInputValue(pkt); break;
             case NNSetupOpcode::COMMIT_REQUEST:        handleCommitRequest(pkt); break;
             case NNSetupOpcode::START:                 handleStart(pkt); break;
             default: break; // HELLO / ACK / NACK / COMMIT_REPLY are laptop-bound, not device-bound
@@ -331,6 +354,12 @@ private:
     float backupWeightStorage[NN_SETUP_MAX_BACKUP_WEIGHTS];
     uint64_t receivedBackupChunkMask;
     uint8_t expectedBackupChunkCount;
+
+    // INPUT_VALUE -- only ever set for a predecessorMask==0 device. Independent
+    // of the primaryComplete()/backupComplete() gating below: doesn't block
+    // COMMIT_REQUEST, since it's orthogonal to topology/weights verification.
+    float pendingInputValue = 0.0f;
+    bool hasInputValue = false;
 
     uint32_t lastAnnounceMs;
     uint32_t announceIntervalMs;
@@ -413,6 +442,14 @@ private:
         weightCount = 0;
         state = NNSetupState::RECEIVING_CONFIG;
         sendAck(NNSetupOpcode::TOPOLOGY_INFO, pkt.header.sequenceNumber);
+        // A weightCount==0 device (e.g. a real physical input-layer node,
+        // predecessorMask==0) has expectedChunkCount==0 and is therefore
+        // ALREADY primaryComplete() -- but nothing else would ever call
+        // maybeAdvanceToVerifying() for it, since that's normally only
+        // triggered by a WEIGHTS_CHUNK arriving and no chunk is ever sent to
+        // a device with zero weights. Without this call such a device would
+        // sit in RECEIVING_CONFIG forever.
+        maybeAdvanceToVerifying();
     }
 
     void handleWeightsChunk(const NNPacket& pkt) {
@@ -479,6 +516,14 @@ private:
         receivedBackupChunkMask |= (uint64_t(1) << msg.chunkIndex);
         sendAck(NNSetupOpcode::BACKUP_WEIGHTS_CHUNK, pkt.header.sequenceNumber);
         maybeAdvanceToVerifying();
+    }
+
+    void handleInputValue(const NNPacket& pkt) {
+        auto msg = unpackSetupMessage<NNInputValueMsg>(pkt);
+        if (msg.hardwareId != hwId) return;
+        pendingInputValue = msg.value;
+        hasInputValue = true;
+        sendAck(NNSetupOpcode::INPUT_VALUE, pkt.header.sequenceNumber);
     }
 
     void handleCommitRequest(const NNPacket& pkt) {

@@ -5,13 +5,25 @@ physical devices (hardware_ids.json) into the full device manifest
 
 network.json shape:
 {
-  "inputSize": 2,          // width of the raw input feature vector -- NOT
-                            // hardware. Matches the project's own reference
-                            // design (see test_reference_network.cpp): raw
-                            // sensor values are injected directly onto the
-                            // medium from virtual node IDs, never run
-                            // through a provisioned NNAware device. Only
-                            // sets the first layer's predecessor count.
+  "inputSize": 2,          // width of the raw input feature vector. By
+                            // default NOT hardware -- matches the project's
+                            // original reference design (see
+                            // test_reference_network.cpp): raw sensor values
+                            // injected directly onto the medium from virtual
+                            // node IDs, never run through a provisioned
+                            // NNAware device. Only sets the first layer's
+                            // predecessor count, UNLESS "inputValues" below
+                            // is present.
+  "inputValues": [1.0, 0.5], // OPTIONAL, one value per input node. When
+                            // present, EVERY input node becomes a real
+                            // physical device too (layerId 0, predecessorMask
+                            // 0, activationType LINEAR) -- its value is
+                            // pushed to it over a dedicated INPUT_VALUE setup
+                            // message (NNSetupProtocol.h's NNInputValueMsg),
+                            // deliberately separate from "bias", and consumed
+                            // on-device via NNNode::seedOutput(). Omit this
+                            // key entirely to keep the input layer virtual,
+                            // exactly as before this field existed.
   "layers": [               // one entry per COMPUTE layer (hidden/output) --
                             // these ARE hardware, one physical device per node
     {
@@ -59,19 +71,22 @@ matching test_reference_network.cpp).
 
 hardware_ids.json is just a flat pool of physical devices' hardwareId
 values -- written ONCE to match whatever NN_HARDWARE_ID you flashed into
-each device's .ino, never edited again. It may hold MORE entries than
-sum(layer["nodes"] for layer in layers) -- e.g. you own 5 devices but
-today's test network only needs 3 -- in which case only the first N
-(matching node count) are used and the rest sit idle in the pool. It is
-an error only if the network needs MORE hardware nodes than the pool
-has, since inputSize does NOT count (the input feed is not a physical
-device) and there is nothing left to assign.
+each device's .ino, never edited again. It may hold MORE entries than the
+network needs -- e.g. you own 5 devices but today's test network only
+needs 3 -- in which case only the first N (matching node count) are used
+and the rest sit idle in the pool. It is an error only if the network
+needs MORE hardware nodes than the pool has. Without "inputValues",
+inputSize does NOT count toward that total (the input feed is virtual,
+not a physical device); WITH "inputValues" present, each input node DOES
+count (one physical device each).
 
-Hardware IDs are assigned to nodes in order, walking network.json's
-layers/nodes flattened front-to-back (layer 0 node 0 first, then layer 0
-node 1, ..., then layer 1 node 0, ...) against hardware_ids.json in the
-order given there -- the front of the pool is used first, so if you care
-WHICH physical devices sit idle, put those last in hardware_ids.json.
+Hardware IDs are assigned to nodes in order: when "inputValues" is
+present, its nodes are expanded FIRST (layerId 0, node 0 first, then node
+1, ...), THEN network.json's layers/nodes flattened front-to-back (first
+compute layer's node 0 first, then node 1, ..., then the next layer's
+node 0, ...) -- all against hardware_ids.json in the order given there.
+The front of the pool is used first, so if you care WHICH physical
+devices sit idle, put those last in hardware_ids.json.
 
 Positional/topology fields are derived as follows (see NNNode.h /
 NNScheduler.h for how the device side actually consumes them). Hardware
@@ -109,12 +124,27 @@ def build_devices(network: dict, hardware_ids: list) -> list:
     input_size = network["inputSize"]
     layers = network["layers"]
 
-    total_nodes = sum(layer["nodes"] for layer in layers)
+    # PATCHED: "inputValues" is an OPTIONAL top-level field -- one value per
+    # input node, pushed to that node's own physical device via a dedicated
+    # INPUT_VALUE setup message (NOT the "bias" field -- see NNSetupProtocol.h's
+    # NNInputValueMsg). Its absence means the input layer stays virtual/not
+    # provisioned, exactly as before this field existed -- unmodified networks
+    # keep producing the same devices.json shape they always did.
+    input_values = network.get("inputValues")
+    if input_values is not None and len(input_values) != input_size:
+        raise GenerateError(
+            f"'inputValues' has {len(input_values)} value(s), expected {input_size} "
+            f"(one per input node, matching 'inputSize')"
+        )
+
+    compute_total = sum(layer["nodes"] for layer in layers)
+    total_nodes = compute_total + (input_size if input_values is not None else 0)
     if total_nodes > len(hardware_ids):
         raise GenerateError(
-            f"network.json defines {total_nodes} hardware node(s) (across its 'layers', "
-            f"not counting inputSize) but hardware_ids.json only has {len(hardware_ids)} "
-            f"hardware ID(s) -- add more physical devices to the pool, or shrink the network"
+            f"network.json defines {total_nodes} hardware node(s) ({compute_total} across "
+            f"its 'layers'{f' + {input_size} input node(s) via inputValues' if input_values is not None else ''}) "
+            f"but hardware_ids.json only has {len(hardware_ids)} hardware ID(s) -- add more "
+            f"physical devices to the pool, or shrink the network"
         )
 
     for layer_index, layer in enumerate(layers):
@@ -154,6 +184,29 @@ def build_devices(network: dict, hardware_ids: list) -> list:
 
     devices = []
     hw_id_iter = iter(hardware_ids)
+
+    # PATCHED: real physical input-layer devices, expanded first (layerId 0
+    # comes before the compute layers) -- one per inputValues entry.
+    # predecessorMask=0 (no predecessors at all) and activationType=LINEAR so
+    # a plain NNNode::execute() pass (sum = bias = 0.0, LINEAR is the
+    # identity) is harmless if ever taken; the real value arrives via the
+    # separate INPUT_VALUE message and NNNode::seedOutput(), not bias.
+    if input_values is not None:
+        for node_id, value in enumerate(input_values):
+            devices.append({
+                "hardwareId": next(hw_id_iter),
+                "address": {"nodeId": node_id, "layerId": 0, "clusterId": 0, "reserved": 0},
+                "predecessorMask": 0,
+                "precedingSiblingsMask": (1 << node_id) - 1,
+                "successorLayerId": 1,
+                "transmitSlot": node_id,
+                "activationType": "LINEAR",
+                "weights": [],
+                "predecessorLayerId": 0,
+                "bias": 0.0,
+                "inputValue": value,
+            })
+
     for layer_index, layer in enumerate(layers):
         layer_id = layer_index + 1  # layerId 0 is reserved for the raw input feed
         predecessor_count = input_size if layer_index == 0 else layers[layer_index - 1]["nodes"]

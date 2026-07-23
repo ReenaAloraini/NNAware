@@ -54,6 +54,17 @@ public:
         }
     }
 
+    // For predecessorMask==0 nodes whose value comes from node.seedOutput()
+    // rather than accumulated input packets -- there's nothing to wait for or
+    // compute (seedOutput() already set hasExecuted=true, so the normal
+    // readyToExecute()-driven WAITING_FOR_INPUT -> READY_TO_EXECUTE -> EXECUTING
+    // path would never fire), so skip straight into the normal turn-taking
+    // gate. Turn-taking (precedingSiblingsMask) still applies unchanged from
+    // here on, e.g. for a multi-node input layer.
+    void notifySeeded() {
+        if (state == NNNodeState::WAITING_FOR_INPUT) state = NNNodeState::WAITING_FOR_TURN;
+    }
+
     // Returns true and fills outPkt once when it's this node's turn.
     bool hasOutputReady(NNPacket& outPkt) {
         if (state != NNNodeState::READY_TO_TRANSMIT) return false;

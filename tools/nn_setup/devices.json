@@ -3,6 +3,24 @@
     "hardwareId": "0x0000000000000001",
     "address": {
       "nodeId": 0,
+      "layerId": 0,
+      "clusterId": 0,
+      "reserved": 0
+    },
+    "predecessorMask": 0,
+    "precedingSiblingsMask": 0,
+    "successorLayerId": 1,
+    "transmitSlot": 0,
+    "activationType": "LINEAR",
+    "weights": [],
+    "predecessorLayerId": 0,
+    "bias": 0.0,
+    "inputValue": 1.0
+  },
+  {
+    "hardwareId": "0x0000000000000002",
+    "address": {
+      "nodeId": 0,
       "layerId": 1,
       "clusterId": 0,
       "reserved": 0
@@ -15,24 +33,46 @@
     "weights": [
       0.5
     ],
-    "predecessorLayerId": 0
+    "predecessorLayerId": 0,
+    "bias": 0.2
   },
   {
-    "hardwareId": "0x0000000000000002",
+    "hardwareId": "0x0000000000000003",
+    "address": {
+      "nodeId": 1,
+      "layerId": 1,
+      "clusterId": 0,
+      "reserved": 0
+    },
+    "predecessorMask": 1,
+    "precedingSiblingsMask": 1,
+    "successorLayerId": 2,
+    "transmitSlot": 1,
+    "activationType": "RELU",
+    "weights": [
+      -1.0
+    ],
+    "predecessorLayerId": 0,
+    "bias": 0.0
+  },
+  {
+    "hardwareId": "0x0000000000000004",
     "address": {
       "nodeId": 0,
       "layerId": 2,
       "clusterId": 0,
       "reserved": 0
     },
-    "predecessorMask": 1,
+    "predecessorMask": 3,
     "precedingSiblingsMask": 0,
     "successorLayerId": 3,
     "transmitSlot": 0,
     "activationType": "SIGMOID",
     "weights": [
-      2.0
+      1.0,
+      1.0
     ],
-    "predecessorLayerId": 1
+    "predecessorLayerId": 1,
+    "bias": -0.3
   }
 ]
