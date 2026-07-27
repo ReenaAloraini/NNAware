@@ -9,7 +9,7 @@ fast check on the mapper's own output.
 from __future__ import annotations
 
 import math
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 
 def _activation(name: str, x: float) -> float:
@@ -22,9 +22,15 @@ def _activation(name: str, x: float) -> float:
     return x  # linear
 
 
-def simulate(node_layers: Dict[int, List[dict]], input_values: List[float]) -> List[float]:
-    """input_values: one value per layer-0 node, in node_id order."""
-    outputs: Dict[tuple, float] = {}
+def simulate_all(node_layers: Dict[int, List[dict]], input_values: List[float]) -> Dict[Tuple[int, int], float]:
+    """
+    Returns EVERY node's true output, keyed by (layer_id, node_id) -- not
+    just the final layer. Used by roundtrip.py to get the correct
+    predecessor values for an intermediate-layer device, not only the
+    network's overall inputs. input_values: one value per layer-0 node, in
+    node_id order.
+    """
+    outputs: Dict[Tuple[int, int], float] = {}
 
     for layer_id in sorted(node_layers.keys()):
         for node in node_layers[layer_id]:
@@ -32,13 +38,20 @@ def simulate(node_layers: Dict[int, List[dict]], input_values: List[float]) -> L
                 outputs[(layer_id, node["node_id"])] = input_values[node["node_id"]]
             else:
                 mask = node["predecessor_mask"]
+                pred_layer = node["predecessor_layer_id"]
                 vals = [
-                    outputs[(layer_id - 1, sender_id)]
+                    outputs[(pred_layer, sender_id)]
                     for sender_id in range(16)
                     if mask & (1 << sender_id)
                 ]
                 s = node["bias"] + sum(v * w for v, w in zip(vals, node["weights"]))
                 outputs[(layer_id, node["node_id"])] = _activation(node["activation"], s)
 
+    return outputs
+
+
+def simulate(node_layers: Dict[int, List[dict]], input_values: List[float]) -> List[float]:
+    """input_values: one value per layer-0 node, in node_id order. Returns just the final layer's outputs."""
+    outputs = simulate_all(node_layers, input_values)
     last_layer = max(node_layers.keys())
     return [outputs[(last_layer, n["node_id"])] for n in node_layers[last_layer]]
