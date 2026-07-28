@@ -12,7 +12,8 @@
 // -- run tools/nn_setup/setup_tool.py from a laptop on the same WiFi network.
 // Running phase: UDP multicast (NNTransportUDPMulticast), joined directly to
 // this device's own real layer group (239.1.0.<layerId>) the moment setup
-// finishes -- the laptop is NOT part of the running-phase network at all.
+// finishes -- plus, for a device that has siblings to wait for, a SECOND
+// observation-only group (see NNTransportUDPMulticast.h's own comment).
 #include "NNSetupProtocol.h"
 #include "NNTransportUDP.h"
 #include "NNTransportUDPMulticast.h"
@@ -73,21 +74,36 @@ const char* stateName(NNSetupState s) {
 // switches from the setup-phase broadcast transport to this device's own
 // real-layer multicast group and constructs the running-phase objects.
 void enterRunningPhase() {
-    const NNNodeConfig& cfg = agent.getNodeConfig();
+    const NNNodeConfig&   cfg       = agent.getNodeConfig();
+    const NNWindowConfig& windowCfg = agent.getWindowConfig();
 
     Serial.print("[RunningNode] entering RUNNING -- layer=");
     Serial.print(cfg.address.layerId);
     Serial.print(" node=");
     Serial.println(cfg.address.nodeId);
 
-    runTransport = new NNTransportUDPMulticast(WIFI_SSID, WIFI_PASSWORD, cfg.address.layerId, RUN_PORT);
+    // Siblings broadcast their output to the NEXT layer's group (their
+    // successorLayerId), never to their own layer's group -- so a node that must
+    // wait its turn has to join that group too, observation-only, or it would sit
+    // in WAITING_FOR_TURN forever. See NNTransportUDPMulticast.h. A node with no
+    // siblings ahead of it skips the second socket entirely.
+    uint8_t siblingGroup = (windowCfg.precedingSiblingsMask != 0)
+        ? cfg.successorLayerId
+        : NN_NO_SIBLING_GROUP;
+    if (siblingGroup != NN_NO_SIBLING_GROUP) {
+        Serial.print("[RunningNode] has preceding siblings -- also observing layer ");
+        Serial.println(siblingGroup);
+    }
+
+    runTransport = new NNTransportUDPMulticast(WIFI_SSID, WIFI_PASSWORD, cfg.address.layerId,
+                                               RUN_PORT, siblingGroup);
     if (!runTransport->begin()) {
         Serial.println("[RunningNode] FAILED to join running-phase multicast group -- halting.");
         while (true) delay(1000);
     }
 
     node = new NNNode(cfg);
-    scheduler = new NNScheduler(*node, agent.getWindowConfig());
+    scheduler = new NNScheduler(*node, windowCfg);
 
     // The one place this sketch branches per device: a predecessorMask==0
     // node (a real physical input-layer device) has nothing to wait for --
@@ -171,5 +187,21 @@ void loop() {
         Serial.print(NN_DATA_RETRANSMITS);
         Serial.print("): ");
         Serial.println(outPkt.payload[0], 6);
+
+        // Nothing in the setup protocol says "begin a new pass", and NNNode's
+        // hasExecuted flag blocks a second run until something clears it -- so
+        // self-reset here, leaving this device ready for the next set of inputs.
+        // Sketch policy, not a library requirement (see NNScheduler.h).
+        //
+        // Deliberately NOT for a predecessorMask==0 input device: its value is
+        // fixed at provisioning time (INPUT_VALUE), so there is no "next input"
+        // coming. Resetting would clear the seed, and since readyToExecute() is
+        // trivially true for an empty predecessorMask, the next tick would run
+        // execute() and emit activation(bias) == 0.0 -- then, having no siblings
+        // to wait for, re-transmit that 0.0 on every iteration. Changing a
+        // physical input means re-running setup, so these nodes fire exactly once.
+        if (agent.getNodeConfig().predecessorMask != 0) {
+            scheduler->resetForNextPass();
+        }
     }
 }

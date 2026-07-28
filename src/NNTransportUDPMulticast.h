@@ -65,6 +65,8 @@ public:
         return IPAddress(239, 1, 0, layer);
     }
 
+    bool hasSiblingGroup() const { return siblingGroupLayerId != NN_NO_SIBLING_GROUP; }
+
     bool begin() override {
         WiFi.mode(WIFI_STA);
         WiFi.disconnect();
@@ -97,10 +99,9 @@ public:
         Serial.print(group);
         Serial.println(ok ? "  [ok]" : "  [JOIN FAILED]");
 
-        // PATCHED: optionally join a second group, purely to observe siblings.
-        hasSiblingGroup = (siblingGroupLayerId != NN_NO_SIBLING_GROUP);
+        // Optionally join a second group, purely to observe siblings.
         bool siblingOk = true;
-        if (hasSiblingGroup) {
+        if (hasSiblingGroup()) {
             IPAddress sibGroup = layerGroup(siblingGroupLayerId);
             siblingOk = udpSiblings.beginMulticast(sibGroup, port) != 0;
             Serial.print("[NNTransportUDPMulticast] joined sibling-observation group ");
@@ -133,38 +134,28 @@ public:
     // interface, so callers still route every packet through
     // onPacketReceived() AND onPacketObserved() exactly as before.
     bool receive(NNPacket& outPkt) override {
-        int packetSize = udp.parsePacket();   // non-blocking
-        if (packetSize > 0) {
-            uint8_t buffer[64];
-            int n = udp.read(buffer, sizeof(buffer));
-            if (n > 0 && deserializePacket(buffer, static_cast<uint16_t>(n), outPkt)) {
-                return true;
-            }
-        }
-
-        if (hasSiblingGroup) {
-            int sibSize = udpSiblings.parsePacket();
-            if (sibSize > 0) {
-                uint8_t buffer[64];
-                int n = udpSiblings.read(buffer, sizeof(buffer));
-                if (n > 0 && deserializePacket(buffer, static_cast<uint16_t>(n), outPkt)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return tryReceiveFrom(udp, outPkt)
+            || (hasSiblingGroup() && tryReceiveFrom(udpSiblings, outPkt));
     }
 
     void poll() override {}
 
 private:
+    // One non-blocking drain attempt against a single socket. Shared by both
+    // groups so the buffer size and the read/deserialize validation live in
+    // exactly one place.
+    static bool tryReceiveFrom(WiFiUDP& sock, NNPacket& outPkt) {
+        if (sock.parsePacket() <= 0) return false;   // non-blocking
+        uint8_t buffer[64];
+        int n = sock.read(buffer, sizeof(buffer));
+        return n > 0 && deserializePacket(buffer, static_cast<uint16_t>(n), outPkt);
+    }
+
     const char* ssid;
     const char* password;
     uint8_t     joinLayerId;
     uint16_t    port;
     uint8_t     siblingGroupLayerId;
-    bool        hasSiblingGroup = false;
     WiFiUDP     udp;
     WiFiUDP     udpSiblings;
 };

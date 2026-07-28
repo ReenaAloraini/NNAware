@@ -55,6 +55,12 @@ HEADER_SIZE = struct.calcsize(HEADER_FMT)  # 8
 PACKET_TYPE_DATA = 0
 NN_MAX_PAYLOAD_FLOATS = 16
 
+# The RUNNING phase deliberately uses a different port from the SETUP phase
+# (4210): a device keeps its setup socket and its runtime multicast socket(s)
+# alive at the same time, so they must not share a port. Must match the
+# sketches' RUNTIME_PORT/RUN_PORT and the app's "Runtime port" setting.
+DEFAULT_RUNTIME_PORT = 4211
+
 
 def encode_address(node_id: int, layer_id: int, cluster_id: int = 0, reserved: int = 0) -> int:
     """Mirrors NNAddress.h's encodeAddress() exactly."""
@@ -124,7 +130,7 @@ def layer_group(layer_id: int) -> str:
 def run_inference_on_devices(
     node_layers: Dict[int, List[dict]],
     input_values: List[float],
-    port: int = 4210,
+    port: int = DEFAULT_RUNTIME_PORT,
     timeout_s: float = 10.0,
     multicast_ttl: int = 2,
 ) -> Tuple[List[float], float]:
