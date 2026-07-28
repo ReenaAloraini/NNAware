@@ -213,7 +213,7 @@ with st.expander("Network settings (defaults work for most local networks)"):
         setup_timeout = st.number_input("Seconds to wait per attempt", value=0.5, step=0.1)
     with col2:
         st.markdown("**Running (inference)**")
-        runtime_port = st.number_input("Runtime port", value=4210, step=1)
+        runtime_port = st.number_input("Runtime port", value=4211, step=1)
         run_timeout = st.number_input("Seconds to wait for a result", value=10.0, step=1.0)
 
 nn_setup_dir = DEFAULT_NN_SETUP_DIR
