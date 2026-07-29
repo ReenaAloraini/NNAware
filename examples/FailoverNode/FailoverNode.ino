@@ -104,12 +104,17 @@ NNDuplicateSuppressor    suppressor;   // by value, no heap
 // --- per-pass state owned by this sketch, not by the library ---------------
 // NNNode exposes no getter for its computed output, and NNResendResponder needs
 // that value handed to it, so we cache it at the one moment it is observable.
-bool  haveOutputThisPass = false;
-float myOutputValue      = 0.0f;
+// ownOutputSent doubles as "myOutputValue is valid", which is exactly what
+// NNResendResponder wants for its haveOutputThisPass argument.
 bool  ownOutputSent      = false;
+float myOutputValue      = 0.0f;
 // NNBackupStandby has no targetObserved() getter, so track it here for logging
 // and for deciding when a pass is resolved.
 bool  targetSeenThisPass = false;
+// Set once per pass so the duplicate-suppressor drop is reported once, not once
+// per dropped frame -- a substitute arrives NN_DATA_RETRANSMITS times, and
+// Serial.print blocks inside the receive-drain loop.
+bool  loggedSuppression  = false;
 // A predecessorMask==0 node's value is fixed at provisioning time, so it fires
 // exactly once and must never be reset (see RunningNode.ino's own reasoning).
 bool  passManaged        = true;
@@ -159,7 +164,6 @@ bool isBackupTarget(const NNAddress& src) {
         && src.clusterId == cfg.backupTargetAddress.clusterId;
 }
 
-void noteActivity() { lastActivityMs = millis(); }
 
 void printNodeConfig() {
     const NNNodeConfig& cfg = agent.getNodeConfig();
@@ -223,11 +227,7 @@ void sendOnce(NNPacket& pkt, uint8_t targetLayerId, const char* what) {
 }
 
 void sendAndRetransmit(NNPacket& pkt, uint8_t targetLayerId, uint8_t slot, const char* what) {
-    pkt.header.targetLayerId = targetLayerId;
-    runtimeTransport->send(pkt);
-    Serial.print("[Failover] sent "); Serial.print(what);
-    Serial.print(" -> layer group "); Serial.println(targetLayerId);
-
+    sendOnce(pkt, targetLayerId, what);   // also stamps header.targetLayerId
     retxSlots[slot].pkt   = pkt;
     retxSlots[slot].left  = NN_DATA_RETRANSMITS - 1;
     retxSlots[slot].dueMs = millis() + NN_DATA_RETRANSMIT_GAP_MS;
@@ -302,8 +302,8 @@ void maybeReleaseStalledTurn() {
 // ---------------------------------------------------------------------------
 // Pass lifecycle
 // ---------------------------------------------------------------------------
+// Only called from maybeClosePass(), which has already checked passManaged.
 bool passResolved() {
-    if (!passManaged)   return false;   // seeded input node: fires once, never resets
     if (!ownOutputSent) return false;
     if (standby == nullptr) return true;
     return targetSeenThisPass || standby->didSubstitute() || standby->didTearDown();
@@ -315,11 +315,11 @@ void closePass(const char* reason) {
     responder->resetForNextPass();
     suppressor.reset();                     // NOTE: reset(), NOT resetForNextPass()
 
-    haveOutputThisPass = false;
-    myOutputValue      = 0.0f;
     ownOutputSent      = false;
+    myOutputValue      = 0.0f;
     targetSeenThisPass = false;
     turnStallArmed     = false;
+    loggedSuppression  = false;
     for (uint8_t i = 0; i < 2; i++) retxSlots[i].left = 0;
     lastActivityMs = millis();
 
@@ -430,7 +430,7 @@ void runRuntimeStep() {
     NNPacket pkt{};
     while (runtimeTransport->receive(pkt)) {
         NNAddress src = decodeAddress(pkt.header.sourceAddress);
-        noteActivity();
+        lastActivityMs = millis();
 
         // NNDuplicateSuppressor locks a slot by src.nodeId ALONE, ignoring
         // layerId. This socket carries both this node's predecessor layer and
@@ -439,7 +439,14 @@ void runRuntimeStep() {
         // genuine predecessor packet from a different layer that reuses id k.
         // Only gate the traffic it exists to protect: real predecessor inputs.
         if (src.layerId == cfg.predecessorLayerId && !suppressor.shouldAccept(pkt)) {
-            Serial.println("[Failover] dropped a late original -- a substitute already claimed that slot.");
+            // Logged once per pass, not per frame: a substitute is itself sent
+            // NN_DATA_RETRANSMITS times, so its own copies land here too, and
+            // Serial.print blocks this drain loop during the recovery window.
+            if (!loggedSuppression) {
+                loggedSuppression = true;
+                Serial.println("[Failover] a substitute claimed a slot -- further packets "
+                               "for it are being dropped this pass.");
+            }
             continue;
         }
 
@@ -461,7 +468,7 @@ void runRuntimeStep() {
             // This is the RUNTIME socket. Setup-phase CONTROL packets carry raw
             // struct bytes reinterpreted as floats and would be garbage here --
             // they can't reach us because setup lives on a different port.
-            responder->onPacketObserved(pkt, haveOutputThisPass, myOutputValue);
+            responder->onPacketObserved(pkt, ownOutputSent, myOutputValue);
         } else if (pkt.header.type == NNPacketType::TEARDOWN) {
             Serial.print("[Failover] TEARDOWN observed from L"); Serial.print(src.layerId);
             Serial.print("_N"); Serial.println(src.nodeId);
@@ -497,9 +504,8 @@ void runRuntimeStep() {
     if (runtimeScheduler->hasOutputReady(outPkt)) {
         // The ONLY moment this node's output value is observable -- NNNode has
         // no getter, and NNResendResponder needs it to answer a resend request.
-        myOutputValue      = outPkt.payload[0];
-        haveOutputThisPass = true;
-        ownOutputSent      = true;
+        myOutputValue = outPkt.payload[0];
+        ownOutputSent = true;
         sendAndRetransmit(outPkt, cfg.successorLayerId, /*slot=*/0, "own output");
         // Deliberately NOT resetting here -- see caveat 2 at the top of the file.
     }
