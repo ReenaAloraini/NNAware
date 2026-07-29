@@ -7,8 +7,10 @@
      `--network/--hardware-ids` dynamic mode) does the per-node topology
      expansion. Preferred over emitting devices.json directly: it avoids
      duplicating generate_manifest.py's expansion logic here, and gets
-     backup-pair generation and live HELLO-based dynamic device assignment
-     for free -- neither of which this mapper implements itself. Built
+     backup-pair expansion and live HELLO-based dynamic device assignment
+     for free. This module names the backup PAIRS (the "backups" field,
+     from the app's per-layer selectors); generate_manifest.py derives
+     every other backup field from them. Built
      straight from ModelSpec, not from node_layers -- topology.py's
      per-node expansion is still used locally for validation/simulation
      (constraints.py, simulate.py), just not for this export.
@@ -42,7 +44,7 @@ generate_manifest.py's/setup_tool.py's job for that path.
 from __future__ import annotations
 
 import json
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from core.model_io import ModelSpec
 
@@ -64,32 +66,129 @@ _ACTIVATION_NAME = {
 NN_TERMINAL_LAYER_SENTINEL = 255  # matches test_reference_network.cpp's O0Config.successorLayerId
 
 
-def model_to_network_json(model: ModelSpec) -> dict:
+def _validate_layer_backups(layer_index: int, layer_size: int, layer_backups: Dict[int, int]) -> None:
+    """Rejects only what generate_manifest.py/device_manifest.py would reject anyway,
+    but with a message naming the layer as the UI shows it. Deliberately does NOT
+    reject 2-node layers or non-last backup targets: those shapes need the
+    FailoverNode sketch's round-start gate and turn-stall release, not a ban."""
+    for backer, target in layer_backups.items():
+        if not (0 <= backer < layer_size) or not (0 <= target < layer_size):
+            raise ValueError(
+                f"layer {layer_index + 1}: backup {backer} -> {target} is out of range "
+                f"for a layer with {layer_size} node(s)."
+            )
+        if backer == target:
+            raise ValueError(f"layer {layer_index + 1}: node {backer} cannot back up itself.")
+    if layer_backups and layer_size < 2:
+        raise ValueError(
+            f"layer {layer_index + 1} has {layer_size} node; a backup must be a sibling "
+            f"in the SAME layer, so a one-node layer can't have one."
+        )
+
+
+def model_to_network_json(
+    model: ModelSpec,
+    backups: Optional[Dict[int, Dict[int, int]]] = None,
+    resend_grace_ms: Optional[Dict[int, int]] = None,
+) -> dict:
     """
     Serializes a ModelSpec straight into network.json's shape -- no
     per-node expansion here, that's tools/nn_setup/generate_manifest.py's
     job (see module docstring). model.layers[0] (the input layer) becomes
     inputSize; every later layer becomes one network.json layer entry.
-    "backups" is never emitted -- v1 scope is inference-only with no
-    fault-tolerance assignment; add backup pairs by hand-editing the
-    output JSON, or extend this function later if that becomes automatic.
+
+    backups: {layer_index: {backer_node_id: target_node_id}}, where layer_index
+    indexes model.layers[1:] -- the same index as the emitted "layers" list, so
+    the device-side layerId is layer_index + 1 (generate_manifest.py reserves
+    layerId 0 for the virtual input feed). Backup duty is always sibling-to-
+    sibling within one layer, which is why it lives on the layer entry.
+    Everything else the device needs (backupTargetAddress, backupWeights,
+    backupTargetBias, layerRosterMask, ...) is derived by generate_manifest.py
+    from the target's own entry -- see its docstring.
+
+    resend_grace_ms: {layer_index: ms}, emitted only for layers that actually
+    have a backup. generate_manifest.py defaults it to 50 when absent; the UI
+    passes a larger value, since 50ms is optimistic for WiFi multicast.
+
+    Passing neither emits exactly what this function always emitted, so callers
+    that don't care about fault tolerance are unaffected.
     """
+    backups = backups or {}
+    resend_grace_ms = resend_grace_ms or {}
+
+    for layer_index in backups:
+        if not (0 <= layer_index < len(model.layers) - 1):
+            raise ValueError(
+                f"backups references layer index {layer_index}, but this model has "
+                f"{len(model.layers) - 1} compute layer(s)."
+            )
+
     layers = []
-    for layer in model.layers[1:]:
-        layers.append(
-            {
-                "nodes": layer.size,
-                "activationType": _ACTIVATION_NAME[layer.activation],
-                "weights": [list(row) for row in layer.weights],
-                "bias": list(layer.bias),
-            }
-        )
+    for layer_index, layer in enumerate(model.layers[1:]):
+        entry = {
+            "nodes": layer.size,
+            "activationType": _ACTIVATION_NAME[layer.activation],
+            "weights": [list(row) for row in layer.weights],
+            "bias": list(layer.bias),
+        }
+
+        layer_backups = {int(b): int(t) for b, t in (backups.get(layer_index) or {}).items()}
+        if layer_backups:
+            _validate_layer_backups(layer_index, layer.size, layer_backups)
+            # String keys match generate_manifest.py's documented shape; it reads
+            # them back with int(backer_key).
+            entry["backups"] = {str(b): t for b, t in sorted(layer_backups.items())}
+            if layer_index in resend_grace_ms:
+                entry["resendGraceMs"] = int(resend_grace_ms[layer_index])
+
+        layers.append(entry)
+
     return {"inputSize": model.layers[0].size, "layers": layers}
 
 
-def write_network_json(model: ModelSpec, path: str) -> None:
+def backup_detection_notes(layer_size: int, layer_backups: Dict[int, int]) -> List[str]:
+    """
+    Human-readable notes about backup pairings whose recovery is SLOWER, not
+    broken. Nothing here blocks deployment -- examples/FailoverNode handles both
+    cases -- but it's worth telling the user what to expect on the serial log.
+
+    Devices transmit in node-id order (precedingSiblingsMask == (1 << nodeId) - 1),
+    so if the target isn't the last node in its layer, the nodes after it stall in
+    WAITING_FOR_TURN and only transmit once the sketch's turn-stall timeout fires.
+    And in a 2-node layer there is no third sibling whose transmission signals
+    "the round finished", so the standby leans on the sketch's round-start gate
+    instead.
+    """
+    notes: List[str] = []
+    if not layer_backups:
+        return notes
+
+    if layer_size == 2:
+        notes.append(
+            "This layer has 2 nodes, so there is no third sibling to signal that a round "
+            "finished. FailoverNode compensates by only starting detection once this node's "
+            "own inputs have arrived. Expect a resend request on most passes -- harmless, the "
+            "healthy sibling just answers it."
+        )
+    for backer, target in sorted(layer_backups.items()):
+        if target < layer_size - 1:
+            notes.append(
+                f"N{backer} backs up N{target}, which is not the last node in this layer. "
+                f"If N{target} dies, the nodes after it stall waiting for their turn, so "
+                f"FailoverNode's turn-stall timeout has to fire first. Recovery still works, "
+                f"it just takes roughly a second longer. Targeting N{layer_size - 1} avoids that."
+            )
+    return notes
+
+
+def write_network_json(
+    model: ModelSpec,
+    path: str,
+    backups: Optional[Dict[int, Dict[int, int]]] = None,
+    resend_grace_ms: Optional[Dict[int, int]] = None,
+) -> None:
     with open(path, "w") as f:
-        json.dump(model_to_network_json(model), f, indent=2)
+        json.dump(model_to_network_json(model, backups, resend_grace_ms), f, indent=2)
         f.write("\n")
 
 

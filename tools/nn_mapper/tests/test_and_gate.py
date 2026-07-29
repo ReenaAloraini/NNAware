@@ -101,7 +101,71 @@ def test_network_json_schema():
     assert layer["activationType"] == "RELU"
     assert layer["weights"] == [[1.0, 1.0]]
     assert layer["bias"] == [-1.5]
-    assert "backups" not in layer  # v1 scope: no automatic backup-pair generation
+    assert "backups" not in layer  # no backups requested -> nothing emitted
+
+
+def _three_node_model():
+    """A 2-input, 3-neuron layer -- the smallest shape with room for a real
+    backup pairing that isn't the degenerate mutual pair."""
+    return model_io.ModelSpec(
+        layers=[
+            model_io.LayerSpec(size=2, activation="linear"),
+            model_io.LayerSpec(
+                size=3,
+                activation="relu",
+                weights=[[0.5, 1.0], [-1.0, 2.0], [2.0, -0.5]],
+                bias=[0.0, 0.0, 0.0],
+            ),
+        ]
+    )
+
+
+def test_network_json_emits_backups():
+    model = _three_node_model()
+    net = codegen.model_to_network_json(
+        model, backups={0: {0: 2}}, resend_grace_ms={0: 300},
+    )
+    layer = net["layers"][0]
+    # String keys: generate_manifest.py reads them back with int(backer_key).
+    assert layer["backups"] == {"0": 2}
+    assert layer["resendGraceMs"] == 300
+    # Everything else must be untouched by the backup selection.
+    assert layer["nodes"] == 3
+    assert layer["weights"] == [[0.5, 1.0], [-1.0, 2.0], [2.0, -0.5]]
+
+
+def test_network_json_rejects_bad_backups():
+    model = _three_node_model()
+    for backups, expected in [
+        ({0: {1: 1}}, "cannot back up itself"),
+        ({0: {0: 9}}, "out of range"),
+        ({5: {0: 1}}, "compute layer"),
+    ]:
+        try:
+            codegen.model_to_network_json(model, backups=backups)
+            assert False, f"expected a ValueError for {backups}"
+        except ValueError as e:
+            assert expected in str(e), f"{backups}: got {e!r}"
+
+
+def test_network_json_rejects_backup_on_single_node_layer():
+    model = model_io.load_model(FIXTURE)  # AND gate: one compute layer, one node
+    try:
+        codegen.model_to_network_json(model, backups={0: {0: 1}})
+        assert False, "expected a ValueError: a 1-node layer has no sibling to back up"
+    except ValueError as e:
+        assert "out of range" in str(e) or "sibling" in str(e)
+
+
+def test_backup_detection_notes():
+    # Target is the last node: the straightforward shape, nothing to flag.
+    assert codegen.backup_detection_notes(3, {0: 2}) == []
+    # Target is NOT last: works, but the turn-stall timeout has to fire first.
+    notes = codegen.backup_detection_notes(3, {0: 1})
+    assert len(notes) == 1 and "turn-stall" in notes[0]
+    # A 2-node layer leans on the sketch's round-start gate.
+    assert any("2 nodes" in n for n in codegen.backup_detection_notes(2, {0: 1}))
+    assert codegen.backup_detection_notes(3, {}) == []
 
 
 def test_codegen_cpp_header():
@@ -124,5 +188,9 @@ if __name__ == "__main__":
     test_assign_hardware_ids_skips_virtual_inputs()
     test_devices_json_schema()
     test_network_json_schema()
+    test_network_json_emits_backups()
+    test_network_json_rejects_bad_backups()
+    test_network_json_rejects_backup_on_single_node_layer()
+    test_backup_detection_notes()
     test_codegen_cpp_header()
     print("All tests passed.")

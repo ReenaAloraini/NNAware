@@ -36,6 +36,7 @@ from core.topology import build_topology, device_count
 from core.constraints import ConstraintError, validate_topology
 from core.codegen import (
     NN_TERMINAL_LAYER_SENTINEL,
+    backup_detection_notes,
     physical_nodes,
     model_to_network_json,
     to_cpp_header,
@@ -195,7 +196,92 @@ with st.expander("Show technical details (addresses, predecessor masks, wire-pro
     ]
     st.dataframe(table_rows, width="stretch", hide_index=True)
 
-network_json = model_to_network_json(model)
+
+# ---------------------------------------------------------------------------
+# Backup roles (optional fault tolerance)
+# ---------------------------------------------------------------------------
+# Only the PAIRS are chosen here; generate_manifest.py derives backupWeights,
+# backupTargetBias, layerRosterMask and the rest from the target's own entry.
+# Selections live in st.session_state (Streamlit persists them by widget key),
+# because network_json below is rebuilt from scratch on every rerun. The key
+# carries a topology signature so editing a weight keeps your selections but
+# resizing a layer discards ones that no longer make sense.
+topology_sig = "x".join(str(l.size) for l in model.layers)
+
+backup_selection: dict = {}
+grace_selection: dict = {}
+
+with st.expander("Backup roles (optional -- fault tolerance)"):
+    st.caption(
+        "A device can also stand in for exactly ONE SIBLING in the same layer. If that "
+        "sibling goes silent, this device first asks it to retransmit; if it still doesn't "
+        "answer, this device computes the missing output itself from a copy of the sibling's "
+        "weights and broadcasts it under the sibling's own identity, so the next layer never "
+        "notices. Costs no extra hardware -- backup duty rides on a device that already has "
+        "a job."
+    )
+
+    any_backup = False
+    for layer_index, layer in enumerate(model.layers[1:]):
+        layer_id = layer_index + 1
+        size = layer.size
+
+        if size < 2:
+            st.caption(f"**Layer {layer_id}** — 1 node. A backup has to be a sibling in the "
+                       f"same layer, so this layer can't have one.")
+            continue
+
+        st.markdown(f"**Layer {layer_id}** — {size} nodes")
+        layer_backups: dict = {}
+        cols = st.columns(min(size, 4))
+        for nid in range(size):
+            # Self is simply not offered, so generate_manifest.py's self-backup
+            # rejection is unreachable from the UI.
+            options = ["— none —"] + [f"N{j}" for j in range(size) if j != nid]
+            with cols[nid % len(cols)]:
+                choice = st.selectbox(
+                    f"L{layer_id}_N{nid} backs up",
+                    options=options,
+                    key=f"nnaware_backup_L{layer_index}_N{nid}_{topology_sig}",
+                )
+            if choice != "— none —":
+                layer_backups[nid] = int(choice[1:])
+
+        if layer_backups:
+            any_backup = True
+            backup_selection[layer_index] = layer_backups
+            grace_selection[layer_index] = int(
+                st.number_input(
+                    f"Layer {layer_id}: resend grace (ms) — how long to wait for a "
+                    f"retransmission before substituting",
+                    min_value=50, max_value=2000, value=300, step=50,
+                    key=f"nnaware_grace_L{layer_index}_{topology_sig}",
+                )
+            )
+            st.dataframe(
+                [{"backup device": f"L{layer_id}_N{b}", "stands in for": f"L{layer_id}_N{t}"}
+                 for b, t in sorted(layer_backups.items())],
+                width="stretch", hide_index=True,
+            )
+            for note in backup_detection_notes(size, layer_backups):
+                st.caption(f"ℹ️ {note}")
+
+    if any_backup:
+        st.info(
+            "Flash **examples/FailoverNode** to every board. examples/SetupAndRun and "
+            "examples/RunningNode don't include NNFailover.h -- they accept the backup "
+            "config, report it as configured, and then silently never act on it."
+        )
+    else:
+        st.caption("No backup roles selected -- this deploys exactly as before.")
+
+try:
+    network_json = model_to_network_json(
+        model, backups=backup_selection, resend_grace_ms=grace_selection,
+    )
+except ValueError as e:
+    st.error(f"Backup roles aren't valid: {e}")
+    st.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +516,11 @@ with st.expander("Advanced: verify before deploying (optional, desktop-only)"):
         "provisioning code and the actual device-side C++ code (using a loopback "
         "stand-in for the wireless link), and confirms the result matches this "
         "network's own prediction. No physical device is touched or required."
+    )
+    st.caption(
+        "Note: this check rebuilds the network description on its own, so it verifies the "
+        "network WITHOUT any backup roles you selected above. It still proves the weights, "
+        "topology and predictions are right -- it just doesn't cover backup provisioning."
     )
 
     if SRC_DIR_EXISTS:
