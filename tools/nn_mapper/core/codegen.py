@@ -66,24 +66,39 @@ _ACTIVATION_NAME = {
 NN_TERMINAL_LAYER_SENTINEL = 255  # matches test_reference_network.cpp's O0Config.successorLayerId
 
 
+def eligible_backup_targets(layer_size: int, node_id: int) -> List[int]:
+    """Which siblings node_id may be assigned to back up: everyone in the layer
+    but itself. The single source of truth for that rule -- the UI builds its
+    dropdown from this, and _validate_layer_backups() checks against it, so the
+    options offered and the options accepted can never drift apart."""
+    if layer_size < 2:
+        return []
+    return [j for j in range(layer_size) if j != node_id]
+
+
 def _validate_layer_backups(layer_index: int, layer_size: int, layer_backups: Dict[int, int]) -> None:
     """Rejects only what generate_manifest.py/device_manifest.py would reject anyway,
     but with a message naming the layer as the UI shows it. Deliberately does NOT
     reject 2-node layers or non-last backup targets: those shapes need the
     FailoverNode sketch's round-start gate and turn-stall release, not a ban."""
-    for backer, target in layer_backups.items():
-        if not (0 <= backer < layer_size) or not (0 <= target < layer_size):
-            raise ValueError(
-                f"layer {layer_index + 1}: backup {backer} -> {target} is out of range "
-                f"for a layer with {layer_size} node(s)."
-            )
-        if backer == target:
-            raise ValueError(f"layer {layer_index + 1}: node {backer} cannot back up itself.")
-    if layer_backups and layer_size < 2:
+    # Checked first: in a one-node layer EVERY pairing is invalid, and saying so
+    # once is friendlier than reporting whichever per-pair rule happens to trip.
+    if layer_size < 2:
         raise ValueError(
-            f"layer {layer_index + 1} has {layer_size} node; a backup must be a sibling "
-            f"in the SAME layer, so a one-node layer can't have one."
+            f"layer {layer_index + 1} has {layer_size} node(s); a backup must be a sibling "
+            f"in the SAME layer, so this layer can't have one."
         )
+    for backer, target in layer_backups.items():
+        if not (0 <= backer < layer_size):
+            raise ValueError(
+                f"layer {layer_index + 1}: node {backer} is out of range for a layer "
+                f"with {layer_size} node(s)."
+            )
+        if target not in eligible_backup_targets(layer_size, backer):
+            raise ValueError(
+                f"layer {layer_index + 1}: node {backer} can't back up node {target}. "
+                f"Valid targets are {eligible_backup_targets(layer_size, backer)}."
+            )
 
 
 def model_to_network_json(
@@ -132,7 +147,7 @@ def model_to_network_json(
             "bias": list(layer.bias),
         }
 
-        layer_backups = {int(b): int(t) for b, t in (backups.get(layer_index) or {}).items()}
+        layer_backups = backups.get(layer_index)
         if layer_backups:
             _validate_layer_backups(layer_index, layer.size, layer_backups)
             # String keys match generate_manifest.py's documented shape; it reads
@@ -146,39 +161,39 @@ def model_to_network_json(
     return {"inputSize": model.layers[0].size, "layers": layers}
 
 
-def backup_detection_notes(layer_size: int, layer_backups: Dict[int, int]) -> List[str]:
+def backup_detection_caveats(layer_size: int, layer_backups: Dict[int, int]) -> List[dict]:
     """
-    Human-readable notes about backup pairings whose recovery is SLOWER, not
-    broken. Nothing here blocks deployment -- examples/FailoverNode handles both
-    cases -- but it's worth telling the user what to expect on the serial log.
+    Structural facts about backup pairings whose recovery is SLOWER, not broken.
+    Nothing here blocks deployment. Returns tagged dicts rather than prose so the
+    wording -- and any firmware-specific detail like a timeout duration -- stays
+    in the view layer; this module has no business knowing what the sketch is
+    called or how long it waits.
 
-    Devices transmit in node-id order (precedingSiblingsMask == (1 << nodeId) - 1),
-    so if the target isn't the last node in its layer, the nodes after it stall in
-    WAITING_FOR_TURN and only transmit once the sketch's turn-stall timeout fires.
-    And in a 2-node layer there is no third sibling whose transmission signals
-    "the round finished", so the standby leans on the sketch's round-start gate
-    instead.
+    Kinds:
+      no_round_end_signal -- layer has exactly 2 nodes, so once you exclude the
+        backer and its target there is no third sibling whose transmission could
+        signal "the round finished". Detection has to be started some other way.
+      target_not_last -- devices transmit in node-id order
+        (precedingSiblingsMask == (1 << nodeId) - 1), so if the target isn't last
+        the nodes after it stall in WAITING_FOR_TURN when it dies, and can only
+        transmit once something releases their turn. Carries suggested_target,
+        the pairing that avoids the stall entirely.
     """
-    notes: List[str] = []
+    caveats: List[dict] = []
     if not layer_backups:
-        return notes
+        return caveats
 
     if layer_size == 2:
-        notes.append(
-            "This layer has 2 nodes, so there is no third sibling to signal that a round "
-            "finished. FailoverNode compensates by only starting detection once this node's "
-            "own inputs have arrived. Expect a resend request on most passes -- harmless, the "
-            "healthy sibling just answers it."
-        )
+        caveats.append({"kind": "no_round_end_signal"})
     for backer, target in sorted(layer_backups.items()):
         if target < layer_size - 1:
-            notes.append(
-                f"N{backer} backs up N{target}, which is not the last node in this layer. "
-                f"If N{target} dies, the nodes after it stall waiting for their turn, so "
-                f"FailoverNode's turn-stall timeout has to fire first. Recovery still works, "
-                f"it just takes roughly a second longer. Targeting N{layer_size - 1} avoids that."
-            )
-    return notes
+            caveats.append({
+                "kind": "target_not_last",
+                "backer": backer,
+                "target": target,
+                "suggested_target": layer_size - 1,
+            })
+    return caveats
 
 
 def write_network_json(

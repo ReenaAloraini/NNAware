@@ -137,9 +137,10 @@ def test_network_json_emits_backups():
 def test_network_json_rejects_bad_backups():
     model = _three_node_model()
     for backups, expected in [
-        ({0: {1: 1}}, "cannot back up itself"),
-        ({0: {0: 9}}, "out of range"),
-        ({5: {0: 1}}, "compute layer"),
+        ({0: {1: 1}}, "can't back up node 1"),   # self-backup
+        ({0: {0: 9}}, "can't back up node 9"),   # target out of range
+        ({0: {9: 0}}, "node 9 is out of range"),  # backer out of range
+        ({5: {0: 1}}, "compute layer"),           # no such layer
     ]:
         try:
             codegen.model_to_network_json(model, backups=backups)
@@ -154,18 +155,28 @@ def test_network_json_rejects_backup_on_single_node_layer():
         codegen.model_to_network_json(model, backups={0: {0: 1}})
         assert False, "expected a ValueError: a 1-node layer has no sibling to back up"
     except ValueError as e:
-        assert "out of range" in str(e) or "sibling" in str(e)
+        # The layer-size check runs first, so this is the message every pairing
+        # in a one-node layer gets -- not whichever per-pair rule happens to trip.
+        assert "can't have one" in str(e)
 
 
-def test_backup_detection_notes():
+def test_eligible_backup_targets():
+    assert codegen.eligible_backup_targets(3, 0) == [1, 2]  # never itself
+    assert codegen.eligible_backup_targets(3, 2) == [0, 1]
+    assert codegen.eligible_backup_targets(2, 0) == [1]
+    assert codegen.eligible_backup_targets(1, 0) == []      # no sibling to back up
+
+
+def test_backup_detection_caveats():
     # Target is the last node: the straightforward shape, nothing to flag.
-    assert codegen.backup_detection_notes(3, {0: 2}) == []
-    # Target is NOT last: works, but the turn-stall timeout has to fire first.
-    notes = codegen.backup_detection_notes(3, {0: 1})
-    assert len(notes) == 1 and "turn-stall" in notes[0]
-    # A 2-node layer leans on the sketch's round-start gate.
-    assert any("2 nodes" in n for n in codegen.backup_detection_notes(2, {0: 1}))
-    assert codegen.backup_detection_notes(3, {}) == []
+    assert codegen.backup_detection_caveats(3, {0: 2}) == []
+    # Target is NOT last: works, but later siblings stall until the turn is released.
+    assert codegen.backup_detection_caveats(3, {0: 1}) == [
+        {"kind": "target_not_last", "backer": 0, "target": 1, "suggested_target": 2}
+    ]
+    # A 2-node layer has no third sibling to signal that a round finished.
+    assert {"kind": "no_round_end_signal"} in codegen.backup_detection_caveats(2, {0: 1})
+    assert codegen.backup_detection_caveats(3, {}) == []
 
 
 def test_codegen_cpp_header():
@@ -191,6 +202,7 @@ if __name__ == "__main__":
     test_network_json_emits_backups()
     test_network_json_rejects_bad_backups()
     test_network_json_rejects_backup_on_single_node_layer()
-    test_backup_detection_notes()
+    test_eligible_backup_targets()
+    test_backup_detection_caveats()
     test_codegen_cpp_header()
     print("All tests passed.")

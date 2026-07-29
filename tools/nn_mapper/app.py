@@ -36,7 +36,8 @@ from core.topology import build_topology, device_count
 from core.constraints import ConstraintError, validate_topology
 from core.codegen import (
     NN_TERMINAL_LAYER_SENTINEL,
-    backup_detection_notes,
+    backup_detection_caveats,
+    eligible_backup_targets,
     physical_nodes,
     model_to_network_json,
     to_cpp_header,
@@ -221,34 +222,33 @@ with st.expander("Backup roles (optional -- fault tolerance)"):
         "a job."
     )
 
-    any_backup = False
     for layer_index, layer in enumerate(model.layers[1:]):
         layer_id = layer_index + 1
         size = layer.size
+        label = lambda nid: node_label(node_layers[layer_id][nid])
 
-        if size < 2:
-            st.caption(f"**Layer {layer_id}** — 1 node. A backup has to be a sibling in the "
-                       f"same layer, so this layer can't have one.")
+        if not eligible_backup_targets(size, 0):
+            st.caption(f"**Layer {layer_id}** — {size} node. A backup has to be a sibling in "
+                       f"the same layer, so this layer can't have one.")
             continue
 
         st.markdown(f"**Layer {layer_id}** — {size} nodes")
         layer_backups: dict = {}
         cols = st.columns(min(size, 4))
         for nid in range(size):
-            # Self is simply not offered, so generate_manifest.py's self-backup
-            # rejection is unreachable from the UI.
-            options = ["— none —"] + [f"N{j}" for j in range(size) if j != nid]
+            # None means "no backup duty". Self is never offered, so
+            # generate_manifest.py's self-backup rejection is unreachable here.
             with cols[nid % len(cols)]:
                 choice = st.selectbox(
-                    f"L{layer_id}_N{nid} backs up",
-                    options=options,
+                    f"{label(nid)} backs up",
+                    options=[None] + eligible_backup_targets(size, nid),
+                    format_func=lambda j: "— none —" if j is None else label(j),
                     key=f"nnaware_backup_L{layer_index}_N{nid}_{topology_sig}",
                 )
-            if choice != "— none —":
-                layer_backups[nid] = int(choice[1:])
+            if choice is not None:
+                layer_backups[nid] = choice
 
         if layer_backups:
-            any_backup = True
             backup_selection[layer_index] = layer_backups
             grace_selection[layer_index] = int(
                 st.number_input(
@@ -259,14 +259,31 @@ with st.expander("Backup roles (optional -- fault tolerance)"):
                 )
             )
             st.dataframe(
-                [{"backup device": f"L{layer_id}_N{b}", "stands in for": f"L{layer_id}_N{t}"}
+                [{"backup device": label(b), "stands in for": label(t)}
                  for b, t in sorted(layer_backups.items())],
                 width="stretch", hide_index=True,
             )
-            for note in backup_detection_notes(size, layer_backups):
-                st.caption(f"ℹ️ {note}")
+            # codegen returns tagged facts; the wording (including anything
+            # firmware-specific, like how long FailoverNode waits) belongs here.
+            for c in backup_detection_caveats(size, layer_backups):
+                if c["kind"] == "no_round_end_signal":
+                    st.caption(
+                        "ℹ️ This layer has 2 nodes, so once you exclude the backup and its "
+                        "target there's no third sibling left to signal that a round finished. "
+                        "FailoverNode starts detection once this node's own inputs arrive "
+                        "instead. Expect a resend request on most passes -- harmless, the "
+                        "healthy sibling just answers it."
+                    )
+                elif c["kind"] == "target_not_last":
+                    st.caption(
+                        f"ℹ️ {label(c['backer'])} backs up {label(c['target'])}, which isn't the "
+                        f"last node in this layer. If it dies, the nodes after it stall waiting "
+                        f"for their turn until FailoverNode's turn-stall timeout fires, so "
+                        f"recovery takes about a second longer. Targeting "
+                        f"{label(c['suggested_target'])} avoids that."
+                    )
 
-    if any_backup:
+    if backup_selection:
         st.info(
             "Flash **examples/FailoverNode** to every board. examples/SetupAndRun and "
             "examples/RunningNode don't include NNFailover.h -- they accept the backup "
