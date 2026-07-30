@@ -128,7 +128,15 @@ struct RetxSlot {
     uint8_t       left;
     unsigned long dueMs;
 };
-RetxSlot retxSlots[2];  // 0 = this node's own output, 1 = a substitute
+// Named so a new packet kind is one enum line rather than a literal slot index at
+// the call site plus a hand-updated bound in every loop below.
+enum RetxSlotId : uint8_t {
+    RETX_OWN_OUTPUT = 0,  // this node's own computed output
+    RETX_SUBSTITUTE,      // an output computed on a failed sibling's behalf
+    RETX_REPORT,          // the failover report for the laptop
+    RETX_SLOT_COUNT,
+};
+RetxSlot retxSlots[RETX_SLOT_COUNT];
 
 // NNBackupStandby::ClockFn
 unsigned long clockMs() { return millis(); }
@@ -219,9 +227,14 @@ void printNodeConfig() {
 // failover packet is multicast to 239.1.0.0 -- a group no compute node ever
 // joins -- and is silently lost. Every send in this sketch therefore goes
 // through here with an explicit destination layer.
+// what == nullptr sends QUIETLY. Serial.print blocks, and the failover report goes
+// out inside the recovery window immediately before the substitute the next layer
+// is waiting on -- logging there would spend part of a resendGraceMs budget that
+// can be as low as 50ms. Its caller logs after the substitute is away instead.
 void sendOnce(NNPacket& pkt, uint8_t targetLayerId, const char* what) {
     pkt.header.targetLayerId = targetLayerId;
     runtimeTransport->send(pkt);
+    if (what == nullptr) return;
     Serial.print("[Failover] sent "); Serial.print(what);
     Serial.print(" -> layer group "); Serial.println(targetLayerId);
 }
@@ -235,13 +248,13 @@ void sendAndRetransmit(NNPacket& pkt, uint8_t targetLayerId, uint8_t slot, const
 
 void serviceRetransmits() {
     unsigned long now = millis();
-    for (uint8_t i = 0; i < 2; i++) {
-        if (retxSlots[i].left == 0) continue;
+    for (RetxSlot& slot : retxSlots) {
+        if (slot.left == 0) continue;
         // Signed comparison so millis() rollover (~49 days) can't strand a slot.
-        if ((long)(now - retxSlots[i].dueMs) < 0) continue;
-        runtimeTransport->send(retxSlots[i].pkt);
-        retxSlots[i].left--;
-        retxSlots[i].dueMs = now + NN_DATA_RETRANSMIT_GAP_MS;
+        if ((long)(now - slot.dueMs) < 0) continue;
+        runtimeTransport->send(slot.pkt);
+        slot.left--;
+        slot.dueMs = now + NN_DATA_RETRANSMIT_GAP_MS;
     }
 }
 
@@ -320,7 +333,7 @@ void closePass(const char* reason) {
     targetSeenThisPass = false;
     turnStallArmed     = false;
     loggedSuppression  = false;
-    for (uint8_t i = 0; i < 2; i++) retxSlots[i].left = 0;
+    for (RetxSlot& slot : retxSlots) slot.left = 0;
     lastActivityMs = millis();
 
     Serial.print("[Failover] pass closed ("); Serial.print(reason);
@@ -506,11 +519,21 @@ void runRuntimeStep() {
         // no getter, and NNResendResponder needs it to answer a resend request.
         myOutputValue = outPkt.payload[0];
         ownOutputSent = true;
-        sendAndRetransmit(outPkt, cfg.successorLayerId, /*slot=*/0, "own output");
+        sendAndRetransmit(outPkt, cfg.successorLayerId, RETX_OWN_OUTPUT, "own output");
         // Deliberately NOT resetting here -- see caveat 2 at the top of the file.
     }
 
-    // --- 2. backup standby: resend request, then substitute OR teardown ---
+    // --- 2. the failover REPORT for the laptop ---
+    // NNBackupStandby queues this itself, in the same function that decides to
+    // substitute or tear down, so its flag always matches the action it describes.
+    // Drained BEFORE the substitute below so the report is ahead on the wire of the
+    // result it explains -- belt and braces, since the client also drains briefly
+    // after collecting its outputs. Sent quietly; logged once the substitute is away.
+    if (standby && standby->hasDiagnosticReady(outPkt)) {
+        sendAndRetransmit(outPkt, NN_DIAG_LAYER_GROUP, RETX_REPORT, /*what=*/nullptr);
+    }
+
+    // --- 3. backup standby: resend request, then substitute OR teardown ---
     // All three come out of the same channel, one at a time; classify with the
     // did*() flags, which are set by the builders before the packet is handed
     // over. Check the terminal outcomes first -- the else branch is the request.
@@ -518,7 +541,8 @@ void runRuntimeStep() {
         if (standby->didSubstitute()) {
             Serial.print("[Failover] grace expired, target still SILENT -> SUBSTITUTE = ");
             Serial.println(outPkt.payload[0], 6);
-            sendAndRetransmit(outPkt, cfg.successorLayerId, /*slot=*/1, "SUBSTITUTE");
+            sendAndRetransmit(outPkt, cfg.successorLayerId, RETX_SUBSTITUTE, "SUBSTITUTE");
+            Serial.println("[Failover] failover report sent to the laptop.");
             // If THIS node was itself blocked in WAITING_FOR_TURN on the dead
             // target, the substitute carries exactly the address it is waiting
             // for -- but a board can't be relied on to receive its own multicast
@@ -527,7 +551,11 @@ void runRuntimeStep() {
             targetSeenThisPass = true;
         } else if (standby->didTearDown()) {
             Serial.println("[Failover] grace expired AND the target's inputs never arrived -> TEARDOWN");
+            // TEARDOWN tells the next LAYER to abort; the report already sent above
+            // tells the laptop WHICH node was lost, so the UI can name it instead of
+            // showing an unexplained timeout.
             sendOnce(outPkt, cfg.successorLayerId, "TEARDOWN");
+            Serial.println("[Failover] failover report sent to the laptop.");
             targetSeenThisPass = true;
         } else {
             Serial.println("[Failover] round complete but target SILENT -> asking it to retransmit");
@@ -537,7 +565,7 @@ void runRuntimeStep() {
         }
     }
 
-    // --- 3. we are the node someone asked to retransmit ---
+    // --- 4. we are the node someone asked to retransmit ---
     if (responder->hasResendReady(outPkt)) {
         Serial.print("[Failover] answering a resend request for myself -> ");
         Serial.println(outPkt.payload[0], 6);

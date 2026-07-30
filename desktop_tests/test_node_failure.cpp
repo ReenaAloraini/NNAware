@@ -361,11 +361,167 @@ void runValidatorTests() {
     }
 }
 
+// ============================================================================
+// SECTION C — the failover REPORT (the packet the LAPTOP sees)
+// ============================================================================
+//
+// The substitute packet deliberately carries the TARGET's address, so nothing on
+// the wire names the node that actually stood in -- that is the whole point of the
+// identity substitution, and it is also why a failover is invisible off-board
+// without this report. It is what the mapper UI decodes to tell the user which
+// device failed and which one covered for it.
+//
+// Drives the REAL NNBackupStandby (as Section A does) rather than only the builder,
+// because the property that matters is that the flag matches the branch that queued
+// it -- a substitute reported as unrecoverable, or vice versa, would be worse than
+// no report at all.
+void runFailoverReportTests() {
+    // Same fixture Sections A and B are built on, so the pairing under test can't
+    // drift away from theirs: H0 (node 0) carries backup duty for H1 (node 1).
+    const NNNodeConfig fixture = makeH0ConfigWithBackupForH1();
+    const NNAddress backer = fixture.address;
+    const NNAddress failed = fixture.backupTargetAddress;
+
+    // --- C1: one packet names BOTH nodes, on a group no layer can ever own ---
+    {
+        NNPacket report{};
+        buildFailoverReport(backer, failed, NN_FLAG_FAILOVER_SUBSTITUTE, report);
+
+        NNAddress reportedBacker = decodeAddress(report.header.sourceAddress);
+        assert(reportedBacker.nodeId == backer.nodeId && reportedBacker.layerId == backer.layerId);
+
+        assert(report.header.payloadCount == 1);
+        NNAddress reportedFailed = decodeAddress(static_cast<uint16_t>(report.payload[0]));
+        assert(reportedFailed.nodeId == failed.nodeId && reportedFailed.layerId == failed.layerId);
+
+        assert(report.header.type == NNPacketType::CONTROL);
+        assert(report.header.flags == NN_FLAG_FAILOVER_SUBSTITUTE);
+        assert(report.header.targetLayerId == NN_DIAG_LAYER_GROUP);
+        // Why that group needs no validator: NNAddress::layerId is a 4-bit field, so
+        // the deepest layer a node can occupy is 15 and the highest successor group
+        // it can address is 16.
+        assert(NN_DIAG_LAYER_GROUP > 0x0F);
+        printf("C1 PASSED: report names BOTH the failed node (L%d_N%d) and its stand-in "
+               "(L%d_N%d), on diagnostics group %d\n",
+               reportedFailed.layerId, reportedFailed.nodeId,
+               reportedBacker.layerId, reportedBacker.nodeId, NN_DIAG_LAYER_GROUP);
+    }
+
+    // --- C2: survives the real wire format ---
+    {
+        NNPacket report{};
+        buildFailoverReport(backer, failed, NN_FLAG_FAILOVER_TEARDOWN, report);
+
+        uint8_t buffer[64];
+        uint16_t len = serializePacket(report, buffer, sizeof(buffer));
+        assert(len == 8 + 1 * sizeof(float));
+
+        NNPacket decoded{};
+        assert(deserializePacket(buffer, len, decoded));
+        assert(decoded.header.sourceAddress == report.header.sourceAddress);
+        assert(decoded.header.targetLayerId == NN_DIAG_LAYER_GROUP);
+        assert(decoded.header.type == NNPacketType::CONTROL);
+        assert(decoded.header.flags == NN_FLAG_FAILOVER_TEARDOWN);
+
+        NNAddress reportedFailed = decodeAddress(static_cast<uint16_t>(decoded.payload[0]));
+        assert(reportedFailed.nodeId == failed.nodeId && reportedFailed.layerId == failed.layerId);
+        printf("C2 PASSED: report survives serialize/deserialize intact (%d bytes)\n", len);
+    }
+
+    // --- C3: a real SUBSTITUTION queues a report flagged as a substitution ---
+    {
+        fakeClock = 0;
+        NNNodeConfig h0Cfg = makeH0ConfigWithBackupForH1();
+        NNBackupStandby standby(h0Cfg, testClock);
+
+        standby.onPacketObserved(makeSiblingPacket(2, 1, 5.0f));  // round completes; H1 silent
+        standby.onPacketObserved(makeSiblingPacket(0, 0, 1.0f));  // H1's inputs DO arrive,
+        standby.onPacketObserved(makeSiblingPacket(1, 0, 2.0f));  // so a substitute is possible
+        standby.tick();                                           // -> resend request
+        fakeClock += 10000;
+        standby.tick();                                           // -> substitute
+        assert(standby.didSubstitute());
+
+        NNPacket report{};
+        assert(standby.hasDiagnosticReady(report));
+        assert(report.header.flags == NN_FLAG_FAILOVER_SUBSTITUTE);
+        NNAddress reportedFailed = decodeAddress(static_cast<uint16_t>(report.payload[0]));
+        assert(reportedFailed.nodeId == failed.nodeId && reportedFailed.layerId == failed.layerId);
+        assert(decodeAddress(report.header.sourceAddress).nodeId == backer.nodeId);
+
+        // Read once only -- the sketch sends it once per pass.
+        NNPacket again{};
+        assert(!standby.hasDiagnosticReady(again));
+        printf("C3 PASSED: a real substitution queues a report flagged SUBSTITUTE, once\n");
+    }
+
+    // --- C4: a real TEARDOWN queues a report flagged as unrecoverable ---
+    {
+        fakeClock = 0;
+        NNNodeConfig h0Cfg = makeH0ConfigWithBackupForH1();
+        NNBackupStandby standby(h0Cfg, testClock);
+
+        standby.onPacketObserved(makeSiblingPacket(2, 1, 5.0f));  // round completes; H1 silent
+        standby.tick();                                           // -> resend request
+        fakeClock += 10000;
+        standby.tick();  // H1's inputs never arrived -> teardown, not substitute
+        assert(standby.didTearDown());
+        assert(!standby.didSubstitute());
+
+        NNPacket report{};
+        assert(standby.hasDiagnosticReady(report));
+        assert(report.header.flags == NN_FLAG_FAILOVER_TEARDOWN);
+        printf("C4 PASSED: a real teardown queues a report flagged TEARDOWN, not SUBSTITUTE\n");
+    }
+
+    // --- C5: the report rides a channel of its own ---
+    {
+        fakeClock = 0;
+        NNNodeConfig h0Cfg = makeH0ConfigWithBackupForH1();
+        NNBackupStandby standby(h0Cfg, testClock);
+
+        // Healthy pass: the target speaks for itself, so there is nothing to report.
+        standby.onPacketObserved(makeSiblingPacket(2, 1, 5.0f));
+        standby.onPacketObserved(makeSiblingPacket(1, 1, 3.0f));
+        standby.tick();
+        NNPacket unused{};
+        assert(!standby.hasDiagnosticReady(unused));
+
+        // Failing pass: the substitute and its report must BOTH be retrievable --
+        // hasOutputReady() is single-deep, so a shared channel would drop one.
+        standby.resetForNextPass();
+        standby.onPacketObserved(makeSiblingPacket(2, 1, 5.0f));
+        standby.onPacketObserved(makeSiblingPacket(0, 0, 1.0f));
+        standby.onPacketObserved(makeSiblingPacket(1, 0, 2.0f));
+        standby.tick();
+        NNPacket resendReq{};
+        assert(standby.hasOutputReady(resendReq));   // drain the request first
+        fakeClock += 10000;
+        standby.tick();
+
+        NNPacket substitute{}, report{};
+        assert(standby.hasOutputReady(substitute));
+        assert(standby.hasDiagnosticReady(report));
+        assert(substitute.header.type == NNPacketType::DATA);
+        assert(report.header.type == NNPacketType::CONTROL);
+        // The substitute wears the TARGET's address; only the report names the backup.
+        assert(decodeAddress(substitute.header.sourceAddress).nodeId == failed.nodeId);
+        assert(decodeAddress(report.header.sourceAddress).nodeId == backer.nodeId);
+
+        standby.resetForNextPass();
+        assert(!standby.hasDiagnosticReady(unused));
+        printf("C5 PASSED: report and substitute coexist on separate channels; "
+               "a healthy pass reports nothing\n");
+    }
+}
+
 int main() {
     printf("=== Section A: NNBackupStandby / retransmission / teardown ===\n");
     runBackupStandbyTests();
     printf("\n=== Section B: validateBackupConfig ===\n");
     runValidatorTests();
+    printf("\n=== Section C: the failover report ===\n");
+    runFailoverReportTests();
     printf("\nALL NODE FAILURE TESTS PASSED\n");
     return 0;
 }

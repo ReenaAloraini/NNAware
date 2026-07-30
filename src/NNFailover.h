@@ -38,7 +38,43 @@
  
 // Reuses NNPacketHeader::flags, previously entirely reserved/unused.
 constexpr uint8_t NN_FLAG_FAILOVER_SUBSTITUTE = 0x01;
- 
+// Set on a failover REPORT whose target could not be recovered at all -- the same
+// condition that makes buildTeardownPacket() emit a TEARDOWN.
+constexpr uint8_t NN_FLAG_FAILOVER_TEARDOWN   = 0x02;
+
+// Diagnostics multicast group: reported TO, never joined by any node.
+//
+// NNPacketHeader::targetLayerId is a full uint8_t and
+// NNTransportUDPMulticast::send() routes solely on it (239.1.0.<targetLayerId>),
+// but NNAddress::layerId is a 4-bit field -- so no real layer can ever be 254 and
+// this group is collision-free by construction, with no extra validation needed.
+// Sending to a multicast group requires no membership, so a backup ANYWHERE in
+// the network reaches the laptop in one hop, instead of the failure having to be
+// propagated forward layer by layer.
+constexpr uint8_t NN_DIAG_LAYER_GROUP = 254;
+
+// Builds the packet that tells the laptop a failover happened, naming BOTH the
+// node that failed and the node that stood in for it.
+//
+// The substitute packet itself cannot carry this. It deliberately masquerades as
+// the target (see computeSubstituteOutput below), so it names the failed node but
+// never the backup -- and appending the backup as a second payload float would
+// corrupt the next layer's weighted sum, since NNNode::execute() consumes one
+// weight per payload float. Hence a separate packet on a separate group.
+//
+// Encodes the failed node exactly as queueResendRequest() does: encodeAddress()
+// produces a value well within float32's exact-integer range.
+inline void buildFailoverReport(const NNAddress& backer, const NNAddress& failed,
+                                uint8_t flags, NNPacket& outPkt) {
+    outPkt = NNPacket{};
+    outPkt.header.sourceAddress = encodeAddress(backer);   // who took over
+    outPkt.header.targetLayerId = NN_DIAG_LAYER_GROUP;
+    outPkt.header.type          = NNPacketType::CONTROL;
+    outPkt.header.flags         = flags;
+    outPkt.header.payloadCount  = 1;
+    outPkt.payload[0] = static_cast<float>(encodeAddress(failed));  // who failed
+}
+
 class NNBackupStandby {
 public:
     using ClockFn = unsigned long (*)();
@@ -166,6 +202,22 @@ public:
     bool didRequestResend() const { return resendRequested; }
     bool didSubstitute() const { return hasSubstituted; }
     bool didTearDown() const { return hasTornDown; }
+
+    // The failover REPORT for the operator, on a channel SEPARATE from
+    // hasOutputReady() above: that one is single-deep and already multiplexes the
+    // resend request, the substitute and the teardown, whereas a report has to
+    // coexist with the substitute rather than replace it.
+    //
+    // Queued by computeSubstituteOutput()/buildTeardownPacket() themselves, so the
+    // flag it carries is set by the very code that takes the action it describes --
+    // a caller cannot pair the wrong flag with the wrong branch. Mirrors
+    // NNResendResponder::hasResendReady()'s shape.
+    bool hasDiagnosticReady(NNPacket& outPkt) {
+        if (!diagnosticPending) return false;
+        outPkt = diagnosticPacket;
+        diagnosticPending = false;
+        return true;
+    }
  
     void resetForNextPass() {
         inputBuffer.reset();
@@ -176,6 +228,7 @@ public:
         hasTornDown = false;
         resolved = false;
         outputPending = false;
+        diagnosticPending = false;
         waitStartTime = 0;
         waitStarted = false;
     }
@@ -187,6 +240,13 @@ private:
                addr.clusterId == cfg.backupTargetAddress.clusterId;
     }
  
+    // Called from the two branches below, never by the caller -- see
+    // hasDiagnosticReady() for why the flag is chosen here rather than outside.
+    void queueDiagnostic(uint8_t flags) {
+        buildFailoverReport(cfg.address, cfg.backupTargetAddress, flags, diagnosticPacket);
+        diagnosticPending = true;
+    }
+
     void queueResendRequest() {
         outgoingPacket = NNPacket{};
         outgoingPacket.header.sourceAddress = encodeAddress(cfg.address);  // who is asking
@@ -228,6 +288,7 @@ private:
  
         hasSubstituted = true;
         outputPending = true;
+        queueDiagnostic(NN_FLAG_FAILOVER_SUBSTITUTE);
     }
  
     void buildTeardownPacket() {
@@ -240,6 +301,7 @@ private:
         outgoingPacket.header.payloadCount = 0;
         hasTornDown = true;
         outputPending = true;
+        queueDiagnostic(NN_FLAG_FAILOVER_TEARDOWN);
     }
  
     const NNNodeConfig& cfg;
@@ -252,9 +314,11 @@ private:
     bool hasTornDown = false;
     bool resolved = false;
     bool outputPending = false;
+    bool diagnosticPending = false;
     unsigned long waitStartTime = 0;
     bool waitStarted = false;
     NNPacket outgoingPacket{};
+    NNPacket diagnosticPacket{};
 };
  
 // The RECEIVING side of a resend request. A node that is alive but simply

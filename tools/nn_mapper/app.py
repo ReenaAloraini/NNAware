@@ -433,6 +433,43 @@ def _parse_test_input(text: str, size: int) -> list:
         raise ValueError("every value must be a number")
 
 
+def _address_label(node_layers: dict, addr: tuple) -> str:
+    """A (layer_id, node_id) straight off the wire, rendered with the same label the
+    rest of the app uses. Falls back for an address outside this topology -- the
+    devices could have been provisioned earlier from a different network."""
+    layer_id, node_id = addr
+    nodes = node_layers.get(layer_id, [])
+    node = nodes[node_id] if node_id < len(nodes) else {"layer_id": layer_id, "node_id": node_id}
+    return node_label(node)
+
+
+# runtime.py reports failover facts as tagged dicts; every word lives here -- the
+# same split codegen.backup_detection_caveats() uses.
+FAILOVER_EVENT_KINDS = (
+    ("substituted", "warning", "stood in for it",
+     "**A backup had to be used.** {n} device(s) went silent during this run and a "
+     "sibling stood in. The prediction below is still correct -- the backup recomputed "
+     "the missing output from its own copy of the failed device's weights."),
+    ("unrecoverable", "error", "backup that gave up",
+     "**{n} device(s) could not be recovered.** The backup never received the inputs it "
+     "needed to stand in, so this run was aborted rather than left to time out."),
+)
+
+
+def _render_failover_events(events: list, node_layers: dict) -> None:
+    for kind, box, backup_column, text in FAILOVER_EVENT_KINDS:
+        matching = [e for e in events if e["kind"] == kind]
+        if not matching:
+            continue
+        getattr(st, box)(text.format(n=len(matching)))
+        st.dataframe(
+            [{"failed device": _address_label(node_layers, e["failed"]),
+              backup_column: _address_label(node_layers, e["backup"])}
+             for e in matching],
+            width="stretch", hide_index=True,
+        )
+
+
 run_input_text = st.text_input(
     f"Input values, comma-separated ({input_size} needed)",
     value=", ".join("0" for _ in range(input_size)),
@@ -452,26 +489,43 @@ if st.button("Run", type="primary"):
     if run_input is not None:
         with st.spinner(f"Sending input and waiting up to {run_timeout:.0f}s for a result..."):
             try:
-                output, elapsed = runtime_mod.run_inference_on_devices(
+                output, elapsed, events = runtime_mod.run_inference_on_devices(
                     node_layers, run_input, port=int(runtime_port), timeout_s=run_timeout,
                 )
-                st.session_state["run_result"] = (output, elapsed, None)
+                st.session_state["run_outcome"] = {
+                    "output": output, "elapsed": elapsed, "error": None, "events": events,
+                }
             except (ValueError, TimeoutError, OSError) as e:
-                st.session_state["run_result"] = (None, None, f"{type(e).__name__}: {e}")
+                # InferenceTimeout carries the failover reports seen before it gave
+                # up; a plain ValueError/OSError has none.
+                st.session_state["run_outcome"] = {
+                    "output": None, "elapsed": None,
+                    "error": f"{type(e).__name__}: {e}", "events": getattr(e, "events", []),
+                }
 
-if "run_result" in st.session_state:
-    output, elapsed, error = st.session_state["run_result"]
-    if error:
-        st.error(error)
+if "run_outcome" in st.session_state:
+    outcome = st.session_state["run_outcome"]
+    events = outcome["events"]
+
+    if events:
+        _render_failover_events(events, node_layers)
+
+    if outcome["error"]:
+        # The events panel above already names the devices and says the run was
+        # aborted, so repeating the exception text under it would say the same
+        # thing twice in two registers.
+        if not events:
+            st.error(outcome["error"])
     else:
         col_pred, col_time = st.columns(2)
         with col_pred:
+            output = outcome["output"]
             if len(output) == 1:
                 st.metric("Prediction", f"{output[0]:.4f}")
             else:
                 st.write("Prediction:", output)
         with col_time:
-            st.metric("Execution time", f"{elapsed * 1000:.1f} ms")
+            st.metric("Execution time", f"{outcome['elapsed'] * 1000:.1f} ms")
 
 with st.expander("Quick desktop check (no hardware -- pure Python prediction for comparison)"):
     if st.button("Simulate this input"):

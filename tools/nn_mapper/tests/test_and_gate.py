@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core import codegen, constraints, model_io, simulate, topology
+from core import codegen, constraints, model_io, runtime, simulate, topology
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "..", "examples", "and_gate.json")
 
@@ -192,6 +192,54 @@ def test_codegen_cpp_header():
     assert "VIRTUAL input node" in input_header
 
 
+def _report_bytes(backer, failed, flags):
+    """What NNFailover.h's buildFailoverReport() puts on the wire: backer in
+    sourceAddress, failed node encoded as payload[0], CONTROL type, addressed to the
+    diagnostics group. Built through runtime.build_packet() so the header layout and
+    checksum are not authored a second time here."""
+    backer_node, backer_layer = backer
+    return runtime.build_packet(
+        node_id=backer_node, layer_id=backer_layer,
+        target_layer_id=runtime.NN_DIAG_LAYER_GROUP, sequence=0,
+        values=[float(runtime.encode_address(*failed))],
+        packet_type=runtime.PACKET_TYPE_CONTROL, flags=flags,
+    )
+
+
+def test_parse_packet_keeps_flags():
+    # This byte used to be unpacked and then dropped, which is what made a
+    # substituted result indistinguishable from a healthy one.
+    parsed = runtime.parse_packet(_report_bytes((0, 1), (1, 1), runtime.NN_FLAG_FAILOVER_SUBSTITUTE))
+    assert parsed is not None
+    assert parsed["flags"] == runtime.NN_FLAG_FAILOVER_SUBSTITUTE
+
+
+def test_failover_report_names_both_nodes():
+    data = _report_bytes(backer=(0, 1), failed=(2, 1),
+                         flags=runtime.NN_FLAG_FAILOVER_SUBSTITUTE)
+    event = runtime.parse_failover_report(runtime.parse_packet(data))
+    assert event == {"kind": "substituted", "failed": (1, 2), "backup": (1, 0)}
+
+
+def test_failover_report_teardown_is_unrecoverable():
+    data = _report_bytes((0, 1), (2, 1), runtime.NN_FLAG_FAILOVER_TEARDOWN)
+    event = runtime.parse_failover_report(runtime.parse_packet(data))
+    assert event["kind"] == "unrecoverable"
+    assert event["failed"] == (1, 2)
+
+
+def test_resend_request_is_not_a_failover_report():
+    # A resend request is ALSO a CONTROL packet carrying an encoded address in
+    # payload[0]; flags == 0 is what keeps it from being read as a failover.
+    data = _report_bytes((0, 1), (2, 1), flags=0)
+    assert runtime.parse_failover_report(runtime.parse_packet(data)) is None
+
+
+def test_data_packet_is_not_a_failover_report():
+    data = runtime.build_packet(node_id=0, layer_id=1, target_layer_id=2, sequence=0, values=[0.5])
+    assert runtime.parse_failover_report(runtime.parse_packet(data)) is None
+
+
 if __name__ == "__main__":
     test_device_count_and_addresses()
     test_truth_table()
@@ -205,4 +253,9 @@ if __name__ == "__main__":
     test_eligible_backup_targets()
     test_backup_detection_caveats()
     test_codegen_cpp_header()
+    test_parse_packet_keeps_flags()
+    test_failover_report_names_both_nodes()
+    test_failover_report_teardown_is_unrecoverable()
+    test_resend_request_is_not_a_failover_report()
+    test_data_packet_is_not_a_failover_report()
     print("All tests passed.")

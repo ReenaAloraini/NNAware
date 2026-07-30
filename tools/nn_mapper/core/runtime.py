@@ -53,13 +53,44 @@ from typing import Dict, List, Tuple
 HEADER_FMT = ">HBBBBBB"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)  # 8
 PACKET_TYPE_DATA = 0
+PACKET_TYPE_CONTROL = 1
 NN_MAX_PAYLOAD_FLOATS = 16
+
+# Mirrored from NNFailover.h -- see its NN_DIAG_LAYER_GROUP and buildFailoverReport
+# comments for why group 254 can never collide with a real layer's group, and why
+# this report is the only way a failover is visible off-board.
+NN_DIAG_LAYER_GROUP = 254
+NN_FLAG_FAILOVER_SUBSTITUTE = 0x01
+NN_FLAG_FAILOVER_TEARDOWN = 0x02
+
+
+class InferenceTimeout(TimeoutError):
+    """Not every expected output arrived. Subclasses TimeoutError so existing
+    `except TimeoutError` handlers keep working unchanged.
+
+    Carries the run's facts as attributes rather than only in the message, so a UI
+    can word its own diagnosis (and suppress a redundant one when it is already
+    rendering the failover events): `events` is whatever reports arrived before it
+    gave up, `aborted` says a node was reported unrecoverable rather than the clock
+    simply running out, and `missing` lists the (layer_id, node_id) that never
+    answered."""
+
+    def __init__(self, message: str, events: List[dict], aborted: bool, missing: List[Tuple[int, int]]):
+        super().__init__(message)
+        self.events = events
+        self.aborted = aborted
+        self.missing = missing
 
 # The RUNNING phase deliberately uses a different port from the SETUP phase
 # (4210): a device keeps its setup socket and its runtime multicast socket(s)
 # alive at the same time, so they must not share a port. Must match the
 # sketches' RUNTIME_PORT/RUN_PORT and the app's "Runtime port" setting.
 DEFAULT_RUNTIME_PORT = 4211
+
+# How long to keep listening after the last expected output, for failover reports
+# still crossing the network. Comfortably over the firmware's 150ms retransmit gap,
+# and short enough not to be felt in the UI.
+REPORT_DRAIN_S = 0.25
 
 
 def encode_address(node_id: int, layer_id: int, cluster_id: int = 0, reserved: int = 0) -> int:
@@ -77,19 +108,24 @@ def _checksum(buf: bytes) -> int:
     return sum(buf) & 0xFF
 
 
-def build_packet(node_id: int, layer_id: int, target_layer_id: int, sequence: int, values: List[float]) -> bytes:
-    """Matches transmitter.py's build_packet() field-for-field (DATA packets only)."""
+def build_packet(node_id: int, layer_id: int, target_layer_id: int, sequence: int,
+                 values: List[float], packet_type: int = PACKET_TYPE_DATA, flags: int = 0) -> bytes:
+    """Matches transmitter.py's build_packet() field-for-field. packet_type/flags
+    default to a plain DATA packet; they are parameters so tests can produce the
+    other kinds this module parses (see parse_failover_report) without re-authoring
+    the wire format -- the same reason packet_builder.py's build_full_packet() takes
+    them."""
     source_address = encode_address(node_id, layer_id)
     payload_count = len(values)
     payload_bytes = struct.pack(f">{payload_count}f", *values)
     header_without_checksum = struct.pack(
-        ">HBBBBB", source_address, target_layer_id, PACKET_TYPE_DATA,
-        sequence & 0xFF, payload_count, 0,
+        ">HBBBBB", source_address, target_layer_id, packet_type,
+        sequence & 0xFF, payload_count, flags,
     )
     checksum = _checksum(header_without_checksum + b"\x00" + payload_bytes)
     header = struct.pack(
-        HEADER_FMT, source_address, target_layer_id, PACKET_TYPE_DATA,
-        sequence & 0xFF, payload_count, 0, checksum,
+        HEADER_FMT, source_address, target_layer_id, packet_type,
+        sequence & 0xFF, payload_count, flags, checksum,
     )
     return header + payload_bytes
 
@@ -118,7 +154,40 @@ def parse_packet(data: bytes) -> dict | None:
     return {
         "node_id": node_id, "layer_id": layer_id, "cluster_id": cluster_id,
         "target_layer_id": target_layer_id, "type": ptype,
-        "sequence": sequence, "values": values,
+        "sequence": sequence, "flags": flags, "values": values,
+    }
+
+
+def parse_failover_report(parsed: dict) -> dict | None:
+    """Decodes a failover report (NNFailover.h's buildFailoverReport) into a tagged
+    fact, or None if this packet isn't one.
+
+    Deliberately returns tagged facts rather than prose -- the wording belongs in
+    the UI, the same split codegen.backup_detection_caveats() already uses.
+
+    Note the resend-request CONTROL packet (NNFailover.h's queueResendRequest) has
+    an IDENTICAL shape -- sender in sourceAddress, subject encoded as payload[0] --
+    and is told apart by two independent things: it leaves flags at 0, and it is
+    addressed to a layer's own group, which this client never joins.
+
+    The CONTROL check is not redundant with the caller's: a genuine substitute is a
+    DATA packet carrying NN_FLAG_FAILOVER_SUBSTITUTE too, so dropping it here would
+    make this function misread the very packets it exists to distinguish from.
+    """
+    if parsed["type"] != PACKET_TYPE_CONTROL or not parsed["values"]:
+        return None
+    flags = parsed["flags"]
+    if flags & NN_FLAG_FAILOVER_TEARDOWN:
+        kind = "unrecoverable"
+    elif flags & NN_FLAG_FAILOVER_SUBSTITUTE:
+        kind = "substituted"
+    else:
+        return None
+    failed_node, failed_layer, _cluster, _reserved = decode_address(int(parsed["values"][0]))
+    return {
+        "kind": kind,
+        "failed": (failed_layer, failed_node),          # the node that went silent
+        "backup": (parsed["layer_id"], parsed["node_id"]),  # the node that stood in for it
     }
 
 
@@ -133,14 +202,16 @@ def run_inference_on_devices(
     port: int = DEFAULT_RUNTIME_PORT,
     timeout_s: float = 10.0,
     multicast_ttl: int = 2,
-) -> Tuple[List[float], float]:
+) -> Tuple[List[float], float, List[dict]]:
     """
     Injects input_values onto the real network as DATA packets from the virtual
     input layer, over UDP multicast, and waits for the terminal layer's real
-    device(s) to answer. Returns (output_values, elapsed_seconds), where
+    device(s) to answer. Returns (output_values, elapsed_seconds, events), where
     elapsed_seconds is measured from "all inputs sent" to "all expected outputs
-    received". Raises ValueError for a bad input count, TimeoutError if not every
-    expected output arrives within timeout_s.
+    received" and events is the list of failover facts observed during the run
+    (see parse_failover_report; empty on a healthy run). Raises ValueError for a
+    bad input count, InferenceTimeout (a TimeoutError) if not every expected
+    output arrives.
     """
     input_nodes = [n for n in node_layers.get(0, []) if n["is_input"]]
     if len(input_values) != len(input_nodes):
@@ -160,8 +231,12 @@ def run_inference_on_devices(
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, multicast_ttl)
     sock.bind(("", port))
-    mreq = struct.pack("4sl", socket.inet_aton(result_group), socket.INADDR_ANY)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    # The diagnostics group is the only extra membership, and failover reports are
+    # the only traffic that ever crosses it -- so this stays a two-group listener
+    # rather than a passive observer of every layer.
+    for group in (result_group, layer_group(NN_DIAG_LAYER_GROUP)):
+        mreq = struct.pack("4sl", socket.inet_aton(group), socket.INADDR_ANY)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     sock.settimeout(0.5)
 
     try:
@@ -173,28 +248,60 @@ def run_inference_on_devices(
         start = time.monotonic()
 
         outputs: Dict[Tuple[int, int], float] = {}
+        # Keyed by identity because every report is retransmitted
+        # NN_DATA_RETRANSMITS times; dict order preserves arrival order.
+        events: Dict[tuple, dict] = {}
+        aborted = False
         deadline = start + timeout_s
-        while len(outputs) < len(expected_keys) and time.monotonic() < deadline:
+
+        def absorb(packet: bytes) -> None:
+            """Files one datagram as either a failover report or an expected output."""
+            nonlocal aborted
+            parsed = parse_packet(packet)
+            if not parsed:
+                return
+            if parsed["type"] == PACKET_TYPE_CONTROL:
+                report = parse_failover_report(parsed)
+                if report is not None:
+                    events.setdefault((report["kind"], report["failed"], report["backup"]), report)
+                    # A node AND its backup both failed: no output can ever arrive.
+                    aborted = aborted or report["kind"] == "unrecoverable"
+                return
+            if parsed["type"] != PACKET_TYPE_DATA:
+                return
+            key = (parsed["layer_id"], parsed["node_id"])
+            if key in expected_keys and parsed["values"]:
+                outputs[key] = parsed["values"][0]
+
+        while len(outputs) < len(expected_keys) and not aborted and time.monotonic() < deadline:
             try:
                 data, _addr = sock.recvfrom(1024)
             except socket.timeout:
                 continue
-            parsed = parse_packet(data)
-            if not parsed or parsed["type"] != PACKET_TYPE_DATA:
-                continue
-            key = (parsed["layer_id"], parsed["node_id"])
-            if key in expected_keys and parsed["values"]:
-                outputs[key] = parsed["values"][0]
+            absorb(data)
         elapsed = time.monotonic() - start
+
+        # Drain briefly for reports still in flight. A substitute in a HIDDEN layer
+        # keeps propagating forward after its report is sent, so the report can
+        # legitimately still be arriving as the terminal outputs land -- without this
+        # the client would exit first and the failover would go unreported.
+        drain_until = time.monotonic() + REPORT_DRAIN_S
+        sock.settimeout(REPORT_DRAIN_S)
+        while time.monotonic() < drain_until:
+            try:
+                data, _addr = sock.recvfrom(1024)
+            except socket.timeout:
+                break
+            absorb(data)
 
         if len(outputs) < len(expected_keys):
             missing = sorted(expected_keys - outputs.keys())
-            raise TimeoutError(
-                f"no response from {len(missing)} device(s) within {timeout_s:.1f}s "
-                f"(layer_id, node_id): {missing}"
+            raise InferenceTimeout(
+                f"{len(missing)} device(s) never answered (layer_id, node_id): {missing}",
+                list(events.values()), aborted, missing,
             )
 
         ordered = [outputs[(n["layer_id"], n["node_id"])] for n in output_nodes]
-        return ordered, elapsed
+        return ordered, elapsed, list(events.values())
     finally:
         sock.close()
