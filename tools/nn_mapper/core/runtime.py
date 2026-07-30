@@ -72,14 +72,18 @@ class InferenceTimeout(TimeoutError):
     can word its own diagnosis (and suppress a redundant one when it is already
     rendering the failover events): `events` is whatever reports arrived before it
     gave up, `aborted` says a node was reported unrecoverable rather than the clock
-    simply running out, and `missing` lists the (layer_id, node_id) that never
-    answered."""
+    simply running out, `missing` lists the (layer_id, node_id) that never
+    answered, and `node_outputs` is every OTHER physical device's own output that
+    did arrive before the timeout (keyed by (layer_id, node_id)), so a UI can still
+    show a partial per-device breakdown instead of nothing at all."""
 
-    def __init__(self, message: str, events: List[dict], aborted: bool, missing: List[Tuple[int, int]]):
+    def __init__(self, message: str, events: List[dict], aborted: bool, missing: List[Tuple[int, int]],
+                 node_outputs: Dict[Tuple[int, int], float]):
         super().__init__(message)
         self.events = events
         self.aborted = aborted
         self.missing = missing
+        self.node_outputs = node_outputs
 
 # The RUNNING phase deliberately uses a different port from the SETUP phase
 # (4210): a device keeps its setup socket and its runtime multicast socket(s)
@@ -202,16 +206,19 @@ def run_inference_on_devices(
     port: int = DEFAULT_RUNTIME_PORT,
     timeout_s: float = 10.0,
     multicast_ttl: int = 2,
-) -> Tuple[List[float], float, List[dict]]:
+) -> Tuple[List[float], float, List[dict], Dict[Tuple[int, int], float]]:
     """
     Injects input_values onto the real network as DATA packets from the virtual
     input layer, over UDP multicast, and waits for the terminal layer's real
-    device(s) to answer. Returns (output_values, elapsed_seconds, events), where
-    elapsed_seconds is measured from "all inputs sent" to "all expected outputs
-    received" and events is the list of failover facts observed during the run
-    (see parse_failover_report; empty on a healthy run). Raises ValueError for a
-    bad input count, InferenceTimeout (a TimeoutError) if not every expected
-    output arrives.
+    device(s) to answer. Returns (output_values, elapsed_seconds, events,
+    node_outputs), where elapsed_seconds is measured from "all inputs sent" to
+    "all expected outputs received", events is the list of failover facts
+    observed during the run (see parse_failover_report; empty on a healthy run),
+    and node_outputs is EVERY physical device's own output seen along the way,
+    keyed by (layer_id, node_id) -- not just the terminal layer's -- so the
+    caller can show per-device results, not only the final prediction. Raises
+    ValueError for a bad input count, InferenceTimeout (a TimeoutError) if not
+    every expected output arrives.
     """
     input_nodes = [n for n in node_layers.get(0, []) if n["is_input"]]
     if len(input_values) != len(input_nodes):
@@ -224,17 +231,26 @@ def run_inference_on_devices(
     output_nodes = [n for n in node_layers[last_layer_id] if not n["is_input"]]
     expected_keys = {(n["layer_id"], n["node_id"]) for n in output_nodes}
 
+    # Every physical node across every compute layer -- used to build the full
+    # per-device report, even though only expected_keys (the terminal layer's)
+    # gates when we're done, in the wait loop below.
+    all_physical_nodes = [n for lid in compute_layer_ids for n in node_layers[lid] if not n["is_input"]]
+    all_expected_keys = {(n["layer_id"], n["node_id"]) for n in all_physical_nodes}
+
     inject_group = layer_group(1)  # every input's successor is always the first compute layer
-    result_group = layer_group(last_layer_id + 1)  # matches generate_manifest.py's successorLayerId convention
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, multicast_ttl)
     sock.bind(("", port))
-    # The diagnostics group is the only extra membership, and failover reports are
-    # the only traffic that ever crosses it -- so this stays a two-group listener
-    # rather than a passive observer of every layer.
-    for group in (result_group, layer_group(NN_DIAG_LAYER_GROUP)):
+    # A layer L's devices transmit to the group matching THEIR OWN
+    # successorLayerId, which generate_manifest.py always sets to L + 1 -- so to
+    # observe every physical layer's own output (not just the terminal one, the
+    # only thing the original two-group listener joined), join all of those
+    # groups too, plus the diagnostics group failover reports cross.
+    listen_groups = {layer_group(lid + 1) for lid in compute_layer_ids}
+    listen_groups.add(layer_group(NN_DIAG_LAYER_GROUP))
+    for group in listen_groups:
         mreq = struct.pack("4sl", socket.inet_aton(group), socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     sock.settimeout(0.5)
@@ -270,10 +286,10 @@ def run_inference_on_devices(
             if parsed["type"] != PACKET_TYPE_DATA:
                 return
             key = (parsed["layer_id"], parsed["node_id"])
-            if key in expected_keys and parsed["values"]:
+            if key in all_expected_keys and parsed["values"]:
                 outputs[key] = parsed["values"][0]
 
-        while len(outputs) < len(expected_keys) and not aborted and time.monotonic() < deadline:
+        while not expected_keys.issubset(outputs.keys()) and not aborted and time.monotonic() < deadline:
             try:
                 data, _addr = sock.recvfrom(1024)
             except socket.timeout:
@@ -294,14 +310,14 @@ def run_inference_on_devices(
                 break
             absorb(data)
 
-        if len(outputs) < len(expected_keys):
+        if not expected_keys.issubset(outputs.keys()):
             missing = sorted(expected_keys - outputs.keys())
             raise InferenceTimeout(
                 f"{len(missing)} device(s) never answered (layer_id, node_id): {missing}",
-                list(events.values()), aborted, missing,
+                list(events.values()), aborted, missing, dict(outputs),
             )
 
         ordered = [outputs[(n["layer_id"], n["node_id"])] for n in output_nodes]
-        return ordered, elapsed, list(events.values())
+        return ordered, elapsed, list(events.values()), dict(outputs)
     finally:
         sock.close()
