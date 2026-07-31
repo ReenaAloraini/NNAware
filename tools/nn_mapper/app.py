@@ -506,8 +506,7 @@ if st.button("Run", type="primary"):
     if run_input is not None:
         # Expected values come from a pure-Python simulation of the SAME
         # network + input the user provided in section 1 -- independent of
-        # whatever the real hardware reports, so this is a genuine check, not
-        # just an echo of the device output. simulate_all() returns EVERY
+        # whatever the real hardware reports. simulate_all() returns EVERY
         # node's value, keyed by (layer_id, node_id), which also feeds the
         # per-device breakdown below.
         expected_node_outputs = simulate_mod.simulate_all(node_layers, run_input)
@@ -549,8 +548,6 @@ if "run_outcome" in st.session_state:
         if not events:
             st.error(outcome["error"])
         if outcome.get("expected_output") is not None:
-            # Still show what the network SHOULD have produced, for context
-            # against the per-device breakdown below.
             st.write("Expected output (simulated):", outcome["expected_output"])
     else:
         col_pred, col_expected, col_time = st.columns(3)
