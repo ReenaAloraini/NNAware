@@ -136,18 +136,35 @@ with col_upload:
     use_example = st.button("Reset to AND-gate example", width="stretch")
 
 with col_edit:
-    if "model_json_text" not in st.session_state or use_example:
-        st.session_state["model_json_text"] = example_text
+    # BUGFIX: st.text_area below is keyed ("model_json_editor"). Once that key
+    # exists in session_state, Streamlit reads the widget's displayed value
+    # from session_state[key] directly -- passing a new value= on a later
+    # rerun is silently ignored. The previous version wrote uploads/resets
+    # into a SEPARATE mirror variable (model_json_text) and passed THAT as
+    # value=, which is why uploading a file or clicking "Reset to AND-gate
+    # example" appeared to do nothing: the widget never actually saw it. The
+    # fix is to write directly into session_state["model_json_editor"] (the
+    # widget's own key) and stop passing value= at all.
+    if "model_json_editor" not in st.session_state:
+        st.session_state["model_json_editor"] = example_text
+    if use_example:
+        st.session_state["model_json_editor"] = example_text
+
+    # A file_uploader's return value persists across reruns until the file is
+    # removed, so "uploaded is not None" alone would re-apply the SAME upload
+    # on every later rerun (e.g. every keystroke), clobbering edits made after
+    # it. Only react the first time THIS particular upload is seen.
     if uploaded is not None:
-        st.session_state["model_json_text"] = uploaded.read().decode("utf-8")
+        upload_identity = (uploaded.name, uploaded.size)
+        if st.session_state.get("_last_uploaded_identity") != upload_identity:
+            st.session_state["model_json_editor"] = uploaded.read().decode("utf-8")
+            st.session_state["_last_uploaded_identity"] = upload_identity
 
     model_json_text = st.text_area(
         "Model JSON (layer 0 = input, no weights/bias; later layers fully connected)",
-        value=st.session_state["model_json_text"],
         height=220,
         key="model_json_editor",
     )
-    st.session_state["model_json_text"] = model_json_text
 
 model = None
 try:
