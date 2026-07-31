@@ -487,20 +487,35 @@ if st.button("Run", type="primary"):
         run_input = None
 
     if run_input is not None:
+        # Expected values come from a pure-Python simulation of the SAME
+        # network + input the user provided in section 1 -- independent of
+        # whatever the real hardware reports, so this is a genuine check, not
+        # just an echo of the device output. simulate_all() returns EVERY
+        # node's value, keyed by (layer_id, node_id), which also feeds the
+        # per-device breakdown below.
+        expected_node_outputs = simulate_mod.simulate_all(node_layers, run_input)
+        last_layer_id = max(node_layers.keys())
+        expected_output = [expected_node_outputs[(last_layer_id, n["node_id"])] for n in node_layers[last_layer_id]]
+
         with st.spinner(f"Sending input and waiting up to {run_timeout:.0f}s for a result..."):
             try:
-                output, elapsed, events = runtime_mod.run_inference_on_devices(
+                output, elapsed, events, node_outputs = runtime_mod.run_inference_on_devices(
                     node_layers, run_input, port=int(runtime_port), timeout_s=run_timeout,
                 )
                 st.session_state["run_outcome"] = {
                     "output": output, "elapsed": elapsed, "error": None, "events": events,
+                    "node_outputs": node_outputs,
+                    "expected_output": expected_output, "expected_node_outputs": expected_node_outputs,
                 }
             except (ValueError, TimeoutError, OSError) as e:
-                # InferenceTimeout carries the failover reports seen before it gave
-                # up; a plain ValueError/OSError has none.
+                # InferenceTimeout carries the failover reports AND whatever
+                # partial per-device outputs were seen before it gave up; a
+                # plain ValueError/OSError has neither.
                 st.session_state["run_outcome"] = {
                     "output": None, "elapsed": None,
                     "error": f"{type(e).__name__}: {e}", "events": getattr(e, "events", []),
+                    "node_outputs": getattr(e, "node_outputs", {}),
+                    "expected_output": expected_output, "expected_node_outputs": expected_node_outputs,
                 }
 
 if "run_outcome" in st.session_state:
@@ -516,16 +531,43 @@ if "run_outcome" in st.session_state:
         # thing twice in two registers.
         if not events:
             st.error(outcome["error"])
+        if outcome.get("expected_output") is not None:
+            # Still show what the network SHOULD have produced, for context
+            # against the per-device breakdown below.
+            st.write("Expected output (simulated):", outcome["expected_output"])
     else:
-        col_pred, col_time = st.columns(2)
+        col_pred, col_expected, col_time = st.columns(3)
         with col_pred:
             output = outcome["output"]
             if len(output) == 1:
                 st.metric("Prediction", f"{output[0]:.4f}")
             else:
                 st.write("Prediction:", output)
+        with col_expected:
+            expected_output = outcome["expected_output"]
+            if len(expected_output) == 1:
+                st.metric("Expected output", f"{expected_output[0]:.4f}")
+            else:
+                st.write("Expected output:", expected_output)
         with col_time:
             st.metric("Execution time", f"{outcome['elapsed'] * 1000:.1f} ms")
+
+    if outcome.get("expected_node_outputs"):
+        st.markdown("**Per-device breakdown -- physical vs. simulated:**")
+        node_rows = []
+        for n in physical_nodes(node_layers):
+            key = (n["layer_id"], n["node_id"])
+            expected = outcome["expected_node_outputs"].get(key)
+            actual = outcome["node_outputs"].get(key)
+            node_rows.append({
+                "device": node_label(n),
+                "layer_id": n["layer_id"],
+                "node_id": n["node_id"],
+                "expected (simulated)": f"{expected:.6f}" if expected is not None else "n/a",
+                "actual (physical)": f"{actual:.6f}" if actual is not None else "no response",
+                "match": bool(actual is not None and expected is not None and abs(actual - expected) < 1e-3),
+            })
+        st.dataframe(node_rows, width="stretch", hide_index=True)
 
 with st.expander("Quick desktop check (no hardware -- pure Python prediction for comparison)"):
     if st.button("Simulate this input"):
