@@ -1,0 +1,11 @@
+{
+  "layers": [
+    { "size": 2, "activation": "linear" },
+    { "size": 1, "activation": "relu",
+      "weights": [[0.6, -0.3]],
+      "bias": [0.1] },
+    { "size": 1, "activation": "sigmoid",
+      "weights": [[1.2]],
+      "bias": [-0.2] }
+  ]
+}
