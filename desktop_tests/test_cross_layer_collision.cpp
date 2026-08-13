@@ -79,8 +79,8 @@ void test_without_layer_filter_would_have_been_corrupted() {
     (void)decoyLayerId; (void)realLayerId;  // the old buggy logic never looked at these at all
 
     // Old logic: "if (senderNodeId matches predecessorMask bit) -> store,
-    // OVERWRITING whatever was there" (see NNInputBuffer::storeInput,
-    // Milestone 3's deliberate overwrite-on-repeat design). Since both the
+    // OVERWRITING whatever was there" (see NNInputBuffer::storeInput's
+    // deliberate overwrite-on-repeat design). Since both the
     // decoy and the real packet share nodeId=0, the OLD code would have
     // stored the decoy's 999.0, then the real 3.0 overwrites it -- OR the
     // reverse order, depending on arrival timing. Either way, the node ID

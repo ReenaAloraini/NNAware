@@ -14,11 +14,10 @@
 static unsigned long fakeClock = 0;
 unsigned long testClock() { return fakeClock; }
 
-// Shared across both sections below: a COPY of H1's real weights, used
-// both as H1's actual weights (in the validator section) and as H0's
-// backupWeights standing in for H1 (in both sections) -- confirmed
-// identical before merging, so a single definition is correct, not a
-// coincidence of two independently-typed literals.
+// Shared across both sections below: H1's real weights, used both as H1's
+// actual weights (in the validator section) and as H0's backupWeights
+// standing in for H1 (in both sections) -- they are required to be
+// identical, so a single definition is correct here.
 static const float h1Weights[2] = {-1.0f, 2.0f};
 
 // ============================================================================

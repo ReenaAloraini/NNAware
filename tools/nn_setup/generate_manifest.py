@@ -22,8 +22,7 @@ network.json shape:
                             // message (NNSetupProtocol.h's NNInputValueMsg),
                             // deliberately separate from "bias", and consumed
                             // on-device via NNNode::seedOutput(). Omit this
-                            // key entirely to keep the input layer virtual,
-                            // exactly as before this field existed.
+                            // key entirely to keep the input layer virtual.
   "layers": [               // one entry per COMPUTE layer (hidden/output) --
                             // these ARE hardware, one physical device per node
     {
@@ -39,9 +38,7 @@ network.json shape:
                                   // whole key, or an individual layer's key,
                                   // to default every node in that layer to
                                   // 0.0 -- mirrors device_manifest.py's own
-                                  // optional/default-0.0 handling of "bias",
-                                  // so networks written before this field
-                                  // existed still generate unchanged.
+                                  // optional/default-0.0 handling of "bias".
     },
     {
       "nodes": 1,
@@ -106,7 +103,7 @@ convention:
     no device is ever addressed there, so the extra broadcast target is
     inert
   - bias: this node's own "bias" entry, or 0.0 if the layer omits "bias"
-    entirely (PATCHED -- see network.json shape above)
+    entirely (see network.json shape above)
 
 Usage:
     python generate_manifest.py
@@ -124,12 +121,11 @@ def build_devices(network: dict, hardware_ids: list) -> list:
     input_size = network["inputSize"]
     layers = network["layers"]
 
-    # PATCHED: "inputValues" is an OPTIONAL top-level field -- one value per
-    # input node, pushed to that node's own physical device via a dedicated
+    # "inputValues" is an OPTIONAL top-level field -- one value per input
+    # node, pushed to that node's own physical device via a dedicated
     # INPUT_VALUE setup message (NOT the "bias" field -- see NNSetupProtocol.h's
     # NNInputValueMsg). Its absence means the input layer stays virtual/not
-    # provisioned, exactly as before this field existed -- unmodified networks
-    # keep producing the same devices.json shape they always did.
+    # provisioned.
     input_values = network.get("inputValues")
     if input_values is not None and len(input_values) != input_size:
         raise GenerateError(
@@ -162,8 +158,8 @@ def build_devices(network: dict, hardware_ids: list) -> list:
                     f"{' == inputSize' if layer_index == 0 else ''})"
                 )
 
-        # PATCHED: "bias" is optional per layer; when present it must have
-        # exactly one entry per node, same shape rule as "weights".
+        # "bias" is optional per layer; when present it must have exactly
+        # one entry per node, same shape rule as "weights".
         if "bias" in layer and len(layer["bias"]) != layer["nodes"]:
             raise GenerateError(
                 f"layers[{layer_index}]: 'nodes' is {layer['nodes']} but 'bias' has "
@@ -185,8 +181,8 @@ def build_devices(network: dict, hardware_ids: list) -> list:
     devices = []
     hw_id_iter = iter(hardware_ids)
 
-    # PATCHED: real physical input-layer devices, expanded first (layerId 0
-    # comes before the compute layers) -- one per inputValues entry.
+    # Real physical input-layer devices, expanded first (layerId 0 comes
+    # before the compute layers) -- one per inputValues entry.
     # predecessorMask=0 (no predecessors at all) and activationType=LINEAR so
     # a plain NNNode::execute() pass (sum = bias = 0.0, LINEAR is the
     # identity) is harmless if ever taken; the real value arrives via the
@@ -215,7 +211,7 @@ def build_devices(network: dict, hardware_ids: list) -> list:
         layer_roster_mask = (1 << layer["nodes"]) - 1
         resend_grace_ms = layer.get("resendGraceMs", 50)
         backups = {int(k): v for k, v in layer.get("backups", {}).items()}
-        # PATCHED: defaults every node in the layer to 0.0 bias if "bias" is absent.
+        # Defaults every node in the layer to 0.0 bias if "bias" is absent.
         layer_bias = layer.get("bias", [0.0] * layer["nodes"])
 
         for node_id, weights in enumerate(layer["weights"]):
@@ -229,7 +225,7 @@ def build_devices(network: dict, hardware_ids: list) -> list:
                 "activationType": layer["activationType"],
                 "weights": weights,
                 "predecessorLayerId": predecessor_layer_id,
-                "bias": layer_bias[node_id],  # PATCHED
+                "bias": layer_bias[node_id],
             }
 
             if node_id in backups:
@@ -242,7 +238,7 @@ def build_devices(network: dict, hardware_ids: list) -> list:
                     "resendGraceMs": resend_grace_ms,
                     "layerRosterMask": layer_roster_mask,
                     "backupTargetPredecessorLayerId": predecessor_layer_id,
-                    "backupTargetBias": layer_bias[target_id],  # PATCHED
+                    "backupTargetBias": layer_bias[target_id],
                 }
 
             devices.append(device)

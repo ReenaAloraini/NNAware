@@ -93,8 +93,7 @@ def test_change_payload_count_with_recompute_but_mismatched_length_still_rejecte
     """
     Even recomputing the checksum can't make this valid: payloadCount=1
     but the packet still physically contains 3 floats' worth of bytes —
-    the exact-length check (fixed earlier in this project) catches it
-    independently of the checksum.
+    the exact-length check catches it independently of the checksum.
     """
     mutated = fi.change_payload_count(valid_packet, new_count=1, recompute_checksum=True)
     ok, decoded = deserialize_packet(mutated)

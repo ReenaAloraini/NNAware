@@ -31,8 +31,7 @@ public:
     void broadcast(const NNPacket& pkt, int senderIndex) {
         for (size_t i = 0; i < inboxes.size(); i++) {
             if (static_cast<int>(i) == senderIndex) continue;  // no self-delivery
-            inboxes[i]->push(pkt);  // NNPacketQueue::push already handles a full
-                                      // queue by rejecting silently (Milestone 3) --
+            inboxes[i]->push(pkt);  // NNPacketQueue::push rejects silently when full --
                                       // acceptable for these bounded, short test passes
         }
     }
@@ -69,6 +68,6 @@ public:
 
 private:
     NNMockBroadcastMedium& medium;
-    NNPacketQueue inbox;  // reused, real, unmodified class from NNBuffer.h
+    NNPacketQueue inbox;
     int myIndex;
 };

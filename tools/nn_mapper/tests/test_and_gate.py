@@ -207,8 +207,8 @@ def _report_bytes(backer, failed, flags):
 
 
 def test_parse_packet_keeps_flags():
-    # This byte used to be unpacked and then dropped, which is what made a
-    # substituted result indistinguishable from a healthy one.
+    # flags must survive parsing -- drop it and a substituted result is
+    # indistinguishable from a healthy one.
     parsed = runtime.parse_packet(_report_bytes((0, 1), (1, 1), runtime.NN_FLAG_FAILOVER_SUBSTITUTE))
     assert parsed is not None
     assert parsed["flags"] == runtime.NN_FLAG_FAILOVER_SUBSTITUTE

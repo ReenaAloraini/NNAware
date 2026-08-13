@@ -10,16 +10,15 @@
 // the filtering for us -- a node never even sees traffic addressed to
 // another layer, so no software discard check is needed for real inputs.
 //
-// PATCHED: sibling turn-taking (NNNodeConfig's precedingSiblingsMask, via
-// NNScheduler::onPacketObserved()) needs a device to see its OWN SIBLINGS'
-// transmissions too -- but siblings in the SAME layer send their own
-// outputs to the NEXT layer's group (their successorLayerId), never to
-// their own layer's group. Under the original single-group design, a
-// device could never observe its siblings at all, so any node with a
-// nonzero precedingSiblingsMask would sit in WAITING_FOR_TURN forever.
-// Fixed by optionally joining a SECOND group -- this device's own
-// successorLayerId's group -- purely to OBSERVE (not consume as real
-// input) its own and its siblings' transmissions. Safe even if a stray
+// SIBLING OBSERVATION: sibling turn-taking (NNNodeConfig's
+// precedingSiblingsMask, via NNScheduler::onPacketObserved()) needs a
+// device to see its OWN SIBLINGS' transmissions too -- but siblings in the
+// SAME layer send their own outputs to the NEXT layer's group (their
+// successorLayerId), never to their own layer's group. With only one group
+// joined, a node with a nonzero precedingSiblingsMask would sit in
+// WAITING_FOR_TURN forever. So a device may optionally join a SECOND group
+// -- its own successorLayerId's group -- purely to OBSERVE (not consume as
+// real input) its own and its siblings' transmissions. Safe even if a stray
 // packet from that second group reaches onPacketReceived(): that
 // function's own predecessorLayerId check already rejects anything not
 // actually from this node's real predecessor layer (see NNNode.h), so no
@@ -131,8 +130,8 @@ public:
 
     // Checks the own-layer group first (real inputs), then the sibling-
     // observation group if one was joined -- both feed the SAME receive()
-    // interface, so callers still route every packet through
-    // onPacketReceived() AND onPacketObserved() exactly as before.
+    // interface, so callers route every packet through onPacketReceived()
+    // AND onPacketObserved().
     bool receive(NNPacket& outPkt) override {
         return tryReceiveFrom(udp, outPkt)
             || (hasSiblingGroup() && tryReceiveFrom(udpSiblings, outPkt));

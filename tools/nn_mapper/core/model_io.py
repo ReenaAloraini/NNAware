@@ -11,11 +11,8 @@ v1 scope (matches the NNAware library's current capabilities):
     "weights": [[...]] (N rows, one per neuron, each of length prev_size),
     "bias": [...] (N values, one per neuron)}
 
-NNNodeConfig (as currently written in NNNode.h) has no bias field, so bias
-is not represented here as a per-neuron scalar destined for the wire format.
-topology.py turns each layer's bias vector into predecessor weights against
-a synthetic constant-output node instead (see topology.py docstring) — this
-module only validates and carries the bias values through.
+Bias maps straight onto NNNodeConfig::bias (NNNode.h) — this module only
+validates and carries the values through.
 """
 from __future__ import annotations
 

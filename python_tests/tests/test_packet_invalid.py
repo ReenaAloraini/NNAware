@@ -51,9 +51,8 @@ def test_truncated_payload_is_rejected():
  
 def test_extra_unexpected_bytes_are_rejected():
     """
-    Regression test for the bug fixed in the previous step: a valid packet
-    with trailing garbage appended must now be rejected outright, not
-    silently accepted with the garbage ignored.
+    A valid packet with trailing garbage appended must be rejected
+    outright, not silently accepted with the garbage ignored.
     """
     pkt = build_full_packet(node_id=1, layer_id=1, values=[1.0], extra_bytes=b"\xDE\xAD\xBE\xEF")
     ok, decoded = deserialize_packet(pkt)
@@ -61,7 +60,7 @@ def test_extra_unexpected_bytes_are_rejected():
  
  
 def test_payload_count_larger_than_maximum_is_rejected():
-    """Regression test for the second bug fixed in the previous step."""
+    """A declared payloadCount above NN_MAX_PAYLOAD_FLOATS must be rejected."""
     pkt = build_full_packet(node_id=1, layer_id=1, values=[1.0] * NN_MAX_PAYLOAD_FLOATS,
                              override_payload_count=NN_MAX_PAYLOAD_FLOATS + 1)
     ok, decoded = deserialize_packet(pkt)

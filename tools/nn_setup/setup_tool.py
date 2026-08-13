@@ -25,10 +25,6 @@ for handling a peer that goes offline AFTER the network is already
 RUNNING.
 
 See device_manifest.py for the devices.json schema.
-
-PATCHED: build_device_packets() now passes device["bias"] into
-pack_topology_info() and backup["backupTargetBias"] into
-pack_backup_role_info(), matching both functions' new parameters.
 """
 import argparse
 import json

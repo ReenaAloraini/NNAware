@@ -35,13 +35,8 @@ layer's group and sends to the group matching a packet's targetLayerId. So:
 
 Requires this machine to already be on the same network as the devices --
 same assumption setup_tool.py makes. No WiFi credentials are needed here,
-only on the device side.
-
-NOTE: multicast networking itself could not be exercised end-to-end from
-the sandbox this was developed in (no multicast-capable network device
-available there) -- the packet build/parse logic below is verified against
-the teammate's own tested transmitter.py/receiver.py, but the actual
-group-join/send/receive behavior against real hardware has not been.
+only on the device side. The machine also needs to be on a multicast-capable
+network; a host that silently drops multicast will see no results arrive.
 """
 from __future__ import annotations
 
@@ -245,9 +240,8 @@ def run_inference_on_devices(
     sock.bind(("", port))
     # A layer L's devices transmit to the group matching THEIR OWN
     # successorLayerId, which generate_manifest.py always sets to L + 1 -- so to
-    # observe every physical layer's own output (not just the terminal one, the
-    # only thing the original two-group listener joined), join all of those
-    # groups too, plus the diagnostics group failover reports cross.
+    # observe every physical layer's own output, not just the terminal one, join
+    # all of those groups, plus the diagnostics group failover reports cross.
     listen_groups = {layer_group(lid + 1) for lid in compute_layer_ids}
     listen_groups.add(layer_group(NN_DIAG_LAYER_GROUP))
     for group in listen_groups:

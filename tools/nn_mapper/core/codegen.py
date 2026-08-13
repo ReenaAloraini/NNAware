@@ -124,9 +124,6 @@ def model_to_network_json(
     resend_grace_ms: {layer_index: ms}, emitted only for layers that actually
     have a backup. generate_manifest.py defaults it to 50 when absent; the UI
     passes a larger value, since 50ms is optimistic for WiFi multicast.
-
-    Passing neither emits exactly what this function always emitted, so callers
-    that don't care about fault tolerance are unaffected.
     """
     backups = backups or {}
     resend_grace_ms = resend_grace_ms or {}

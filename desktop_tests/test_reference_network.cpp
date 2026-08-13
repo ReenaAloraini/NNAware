@@ -8,10 +8,10 @@
 //   H1: weights [-1.0, 2.0], ReLU -> expected 3.0
 //   O0: weights [2.0, -0.5], ReLU -> expected 3.5
 //
-// DESIGN NOTE, confirmed by inspecting the real NNNode.h: onPacketReceived
-// matches predecessors by NODE ID ONLY, not layer -- so on a single shared
-// broadcast medium, node IDs must be unique ACROSS THE WHOLE NETWORK, not
-// just within each layer. Assigned here as: x0=0, x1=1, H0=2, H1=3, O0=4.
+// Node IDs are unique across the whole network here (x0=0, x1=1, H0=2,
+// H1=3, O0=4) rather than only within each layer. NNNode::onPacketReceived
+// filters by predecessorLayerId, so this isn't required for correctness --
+// it just keeps the trace readable when every node shares one medium.
 //
 // BACKUP TOPOLOGY: H0 and H1 mutually back each other up (same layer,
 // per the project's per-layer-sibling design). O0 is alone in layer 2 and
@@ -19,8 +19,7 @@
 // consequence of the reference network's shape, not a limitation of the
 // test. Single-failure tests target H1 (backed up by H0).
 //
-// MULTIPLE SIMULTANEOUS FAILURES: explicitly deferred per an earlier,
-// direct decision in this project -- not built or tested here. See the
+// MULTIPLE SIMULTANEOUS FAILURES are not built or tested here. See the
 // skipped placeholder test at the bottom of this file.
 
 #include <cassert>
@@ -150,8 +149,8 @@ NetworkResult runReferenceNetwork(bool h1IsAlive) {
     NNDuplicateSuppressor o0Suppressor;  // O0 receives from H0/H1 -- the only node needing this here
 
     // Inject the fixed reference inputs directly -- x0/x1 have no NNNode
-    // of their own, matching the earlier design decision that raw sensor
-    // inputs are simulated as directly-injected packets, not NNNode instances.
+    // of their own: raw sensor inputs are simulated as directly-injected
+    // packets, not NNNode instances.
     medium.injectDirect(makeInputPacket(0, 1.0f));
     medium.injectDirect(makeInputPacket(1, 2.0f));
 
@@ -256,10 +255,9 @@ void test_backup_weights_are_structurally_separate_from_own_weights() {
 
 void test_multiple_simultaneous_failures_deferred() {
     // EXPLICITLY DEFERRED: scenarios where H0 ALSO fails (i.e. the node
-    // backing up H1 is itself unavailable) are not implemented or tested,
-    // per an earlier, direct decision in this project to defer this until
-    // after the framework's UI is built. This placeholder exists so the
-    // gap is documented in the test suite itself, not silently absent.
+    // backing up H1 is itself unavailable) are not implemented or tested.
+    // This placeholder exists so the gap is documented in the test suite
+    // itself, not silently absent.
     printf("SKIPPED (by design): multiple simultaneous failures -- explicitly deferred, "
            "not yet implemented. See NNFailover.h's top-of-file design note.\n");
 }

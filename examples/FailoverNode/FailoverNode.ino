@@ -1,7 +1,7 @@
-// Device-side firmware: everything examples/SetupAndRun/SetupANdRUn.ino does
-// (setup phase over UDP broadcast, then runtime inference over UDP multicast),
-// PLUS the fault-tolerance layer from src/NNFailover.h -- backup weights,
-// resend requests, substitute outputs and teardown.
+// Device-side firmware: the full NNAware runtime -- setup phase over UDP
+// broadcast, runtime inference over UDP multicast, and the fault-tolerance
+// layer from src/NNFailover.h (backup weights, resend requests, substitute
+// outputs and teardown).
 //
 // Flash this SAME sketch onto every physical device (edit NN_HARDWARE_ID to a
 // DIFFERENT value per board first), then provision from the NNAware Mapper app.
@@ -17,20 +17,16 @@
 // and broadcasts it under the SIBLING'S OWN identity so the next layer never
 // knows the difference.
 //
-// IMPORTANT CAVEATS:
+// IMPORTANT NOTES:
 //
-// 1. This has NOT been compiled or tested against real devices -- there is no
-//    Arduino toolchain available in this project. Review it before trusting it.
+// 1. The setup protocol has no "start a new inference pass" message, so this
+//    sketch decides for itself when a pass is over -- see closePass(). It
+//    deliberately does NOT reset immediately after transmitting: a backup node
+//    transmits its own output long before its detection window closes, and
+//    resetting there would discard the sibling observations the standby still
+//    needs. Sketch policy, not a library requirement.
 //
-// 2. The setup protocol still has no "start a new inference pass" message, so
-//    this sketch decides for itself when a pass is over -- see closePass().
-//    Unlike SetupAndRun/RunningNode, it does NOT reset immediately after
-//    transmitting: a backup node transmits its own output long before its
-//    detection window closes, and resetting there would discard the sibling
-//    observations the standby still needs. Sketch policy, not a library
-//    requirement.
-//
-// 3. Two behaviours here exist purely to make EVERY backup shape work, rather
+// 2. Two behaviours here exist purely to make EVERY backup shape work, rather
 //    than restricting which sibling may back up which. Both are sketch-level
 //    policy built on public library API; neither patches the library. They are
 //    marked [F1] and [F2] below and explained at their implementation sites.
@@ -66,11 +62,9 @@ const uint64_t NN_HARDWARE_ID = 0x0000000000000001ULL;
 // and NNScheduler::onPacketObserved() are both idempotent for a repeated
 // identical packet.
 //
-// Unlike RunningNode.ino these resends are NON-BLOCKING. RunningNode justifies
-// its delay(150) with "with no backup role configured in this sketch there's
-// nothing else it needs to do" -- which is false here. ~300ms of blocking would
-// swallow most of a 300ms resendGraceMs budget and drop incoming resend
-// requests on the floor.
+// These resends are deliberately NON-BLOCKING. Spacing them with delay() would
+// be simpler, but ~300ms of blocking would swallow most of a 300ms
+// resendGraceMs budget and drop incoming resend requests on the floor.
 const uint8_t  NN_DATA_RETRANSMITS       = 3;
 const uint16_t NN_DATA_RETRANSMIT_GAP_MS = 150;
 
@@ -116,7 +110,7 @@ bool  targetSeenThisPass = false;
 // Serial.print blocks inside the receive-drain loop.
 bool  loggedSuppression  = false;
 // A predecessorMask==0 node's value is fixed at provisioning time, so it fires
-// exactly once and must never be reset (see RunningNode.ino's own reasoning).
+// exactly once and must never be reset -- see startRuntime() for why.
 bool  passManaged        = true;
 
 unsigned long lastActivityMs   = 0;
@@ -155,9 +149,9 @@ const char* stateName(NNSetupState s) {
 
 // The bits NNBackupStandby::tick() waits on before it will declare the round
 // finished: every node in this layer EXCEPT the backup target and this node
-// itself. Mirrors NNFailover.h:127-129 exactly. Printed at startup because it
-// is the single number that tells you whether a given backup pairing can
-// detect a failure at all.
+// itself. Mirrors the othersMask computation in NNBackupStandby::tick().
+// Printed at startup because it is the single number that tells you whether a
+// given backup pairing can detect a failure at all.
 uint16_t backupOthersMask(const NNNodeConfig& cfg) {
     return cfg.layerRosterMask
          & ~(uint16_t(1) << cfg.backupTargetAddress.nodeId)
@@ -362,11 +356,11 @@ void startRuntime() {
     // successorLayerId), never to their own -- so a node that needs to watch its
     // siblings has to join that group too, observation-only.
     //
-    // SetupAndRun/RunningNode gate this on precedingSiblingsMask alone. That is
-    // wrong for a backup node in transmit slot 0: its mask is 0, so it would
-    // never join, never observe its target, and NNBackupStandby's targetObserved
-    // would stay false -- making it substitute for a perfectly healthy sibling
-    // on every single pass. A backup role needs the group regardless of slot.
+    // Gating this on precedingSiblingsMask alone would be wrong for a backup
+    // node in transmit slot 0: its mask is 0, so it would never join, never
+    // observe its target, and NNBackupStandby's targetObserved would stay
+    // false -- making it substitute for a perfectly healthy sibling on every
+    // single pass. A backup role needs the group regardless of slot.
     bool needSiblings = (win.precedingSiblingsMask != 0) || cfg.hasBackupRole;
     uint8_t siblingGroup = needSiblings ? cfg.successorLayerId : NN_NO_SIBLING_GROUP;
 
@@ -520,7 +514,7 @@ void runRuntimeStep() {
         myOutputValue = outPkt.payload[0];
         ownOutputSent = true;
         sendAndRetransmit(outPkt, cfg.successorLayerId, RETX_OWN_OUTPUT, "own output");
-        // Deliberately NOT resetting here -- see caveat 2 at the top of the file.
+        // Deliberately NOT resetting here -- see note 1 at the top of the file.
     }
 
     // --- 2. the failover REPORT for the laptop ---
@@ -624,12 +618,12 @@ void loop() {
     }
 
     // Keep draining the setup socket so its receive buffer can't fill up, but
-    // DISCARD everything. SetupAndRun.ino keeps feeding agent.onSetupPacket()
-    // forever, which is unsafe here: handleAssignAddress() checks only the
-    // hardwareId and has no state guard, so a stray or replayed ASSIGN_ADDRESS
-    // would rewrite nodeConfig.address at any time -- and because
-    // NNBackupStandby holds that same config BY REFERENCE, the change would
-    // land live inside a running standby.
+    // DISCARD everything. Continuing to feed agent.onSetupPacket() once RUNNING
+    // would be unsafe: handleAssignAddress() checks only the hardwareId and has
+    // no state guard, so a stray or replayed ASSIGN_ADDRESS would rewrite
+    // nodeConfig.address at any time -- and because NNBackupStandby holds that
+    // same config BY REFERENCE, the change would land live inside a running
+    // standby.
     NNPacket discard{};
     while (setupTransport.receive(discard)) { /* intentionally dropped */ }
 

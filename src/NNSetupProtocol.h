@@ -9,7 +9,7 @@
 // go live.
 //
 // Carried as NNPacketType::CONTROL packets. The opcode lives in
-// NNPacketHeader.flags (previously reserved/unused). Every setup message
+// NNPacketHeader.flags. Every setup message
 // is laid out as a whole number of 4-byte words so it can ride through the
 // EXISTING serializePacket()/deserializePacket() functions unmodified --
 // those only understand "N floats", they don't know or care that the bytes
@@ -20,12 +20,6 @@
 // max per packet. Every message below is sized to fit that ceiling exactly,
 // so this protocol works whether or not that transport buffer size ever
 // gets bumped to match NN_MAX_PAYLOAD_FLOATS (16).
-//
-// PATCHED: NNTopologyInfoMsg gained a `bias` field and NNBackupRoleInfoMsg
-// gained a `backupTargetBias` field, mirroring the same additions to
-// NNNodeConfig in NNNode.h. Both messages are still a whole number of
-// 4-byte words (24 and 28 bytes respectively) and stay well under the
-// 56-byte ceiling above.
 //
 // ORDERING ASSUMPTIONS: a device expects ASSIGN_ADDRESS before TOPOLOGY_INFO
 // (topology setup derives windowConfig.ownLayerId from the just-assigned
@@ -84,7 +78,7 @@ constexpr uint8_t NN_SETUP_MAX_WEIGHTS        = 64; // device-side storage cap; 
 constexpr uint8_t NN_SETUP_MAX_BACKUP_WEIGHTS = 64; // device-side storage cap for backupWeights
 
 constexpr uint8_t NN_SETUP_NACK_BAD_CHUNK_INDEX = 1; // chunkIndex >= this device's own expected chunk count
-constexpr uint8_t NN_SETUP_NACK_WRONG_STATE     = 2; // reserved -- not currently emitted (see NNNackMsg below)
+constexpr uint8_t NN_SETUP_NACK_WRONG_STATE     = 2; // reserved -- not currently emitted
 
 // Every struct below is exactly a whole number of 4-byte words, so it maps
 // directly onto NNPacket.payload (float[16]) via memcpy, with payloadCount
@@ -114,7 +108,7 @@ struct NNTopologyInfoMsg {
     uint8_t  transmitSlot;
     uint8_t  predecessorLayerId;    // which layer predecessorMask's node IDs actually live in
                                      // (NNNodeConfig's cross-layer-collision-fix field)
-    float    bias;                  // NEW -- mirrors NNNodeConfig::bias (NNNode.h)
+    float    bias;                  // mirrors NNNodeConfig::bias (NNNode.h)
     uint8_t  _reserved[3] = {0, 0, 0}; // pads to a whole number of 4-byte words (24 bytes total)
 };
 
@@ -142,7 +136,7 @@ struct NNBackupRoleInfoMsg {
     uint8_t  backupWeightCount;
     uint32_t resendGraceMs;               // fixed-width on the wire, regardless of local `unsigned long` width
     uint8_t  backupTargetPredecessorLayerId; // which layer backupTargetPredecessorMask's node IDs live in
-    float    backupTargetBias;            // NEW -- mirrors NNNodeConfig::backupTargetBias (NNNode.h)
+    float    backupTargetBias;            // mirrors NNNodeConfig::backupTargetBias (NNNode.h)
     uint8_t  _reserved[3] = {0, 0, 0};       // pads to a whole number of 4-byte words (28 bytes total)
 };
 
@@ -229,9 +223,9 @@ struct NNPersistedConfig {
     uint8_t  weightCount;
     float    weights[NN_SETUP_MAX_WEIGHTS];
     uint8_t  predecessorLayerId = 0; // which layer predecessorMask's node IDs live in (cross-layer-collision fix)
-    float    bias = 0.0f;            // NEW -- mirrors NNNodeConfig::bias (NNNode.h)
+    float    bias = 0.0f;            // mirrors NNNodeConfig::bias (NNNode.h)
 
-    // Backup role -- mirrors NNNodeConfig's own appended backup fields
+    // Backup role -- mirrors NNNodeConfig's own backup fields
     // (NNNode.h). hasBackupRole == false is the common case: everything
     // below is then meaningless and never read back out.
     bool     hasBackupRole = false;
@@ -242,7 +236,7 @@ struct NNPersistedConfig {
     uint8_t  backupWeightCount = 0;
     uint32_t resendGraceMs = 0;
     uint8_t  backupTargetPredecessorLayerId = 0; // which layer backupTargetPredecessorMask's node IDs live in
-    float    backupTargetBias = 0.0f;            // NEW -- mirrors NNNodeConfig::backupTargetBias (NNNode.h)
+    float    backupTargetBias = 0.0f;            // mirrors NNNodeConfig::backupTargetBias (NNNode.h)
     float    backupWeights[NN_SETUP_MAX_BACKUP_WEIGHTS];
 };
 
@@ -347,10 +341,8 @@ private:
     uint8_t expectedChunkCount;
 
     // Backup role -- unused (stays all-zero/false) for a device with no
-    // backup duty. nodeConfig.weights/backupWeights below both point into
-    // THIS object's own RAM arrays, not flash -- see the note on
-    // NNNodeConfig::weights in NNNode.h, which predates network-provisioned
-    // devices and doesn't reflect this code path.
+    // backup duty. nodeConfig.weights/backupWeights both end up pointing
+    // into THIS object's own RAM arrays, not flash.
     float backupWeightStorage[NN_SETUP_MAX_BACKUP_WEIGHTS];
     uint64_t receivedBackupChunkMask;
     uint8_t expectedBackupChunkCount;
@@ -432,7 +424,7 @@ private:
         nodeConfig.activationType    = static_cast<NNActivationType>(msg.activationType);
         nodeConfig.weightCount       = msg.weightCount;
         nodeConfig.predecessorLayerId = msg.predecessorLayerId;
-        nodeConfig.bias               = msg.bias;   // NEW
+        nodeConfig.bias               = msg.bias;
 
         windowConfig.ownLayerId            = nodeConfig.address.layerId; // requires ASSIGN_ADDRESS already handled
         windowConfig.precedingSiblingsMask = msg.precedingSiblingsMask;
@@ -489,7 +481,7 @@ private:
         nodeConfig.resendGraceMs                        = static_cast<unsigned long>(msg.resendGraceMs);
         nodeConfig.layerRosterMask                      = msg.layerRosterMask;
         nodeConfig.backupTargetPredecessorLayerId       = msg.backupTargetPredecessorLayerId;
-        nodeConfig.backupTargetBias                     = msg.backupTargetBias;   // NEW
+        nodeConfig.backupTargetBias                     = msg.backupTargetBias;
 
         expectedBackupChunkCount = (msg.backupWeightCount + NN_WEIGHTS_CHUNK_MAX_FLOATS - 1) / NN_WEIGHTS_CHUNK_MAX_FLOATS;
         receivedBackupChunkMask = 0;
@@ -552,7 +544,7 @@ private:
             toSave.weightCount            = nodeConfig.weightCount;
             memcpy(toSave.weights, weightStorage, sizeof(float) * nodeConfig.weightCount);
             toSave.predecessorLayerId     = nodeConfig.predecessorLayerId;
-            toSave.bias                   = nodeConfig.bias;   // NEW
+            toSave.bias                   = nodeConfig.bias;
 
             toSave.hasBackupRole = nodeConfig.hasBackupRole;
             if (nodeConfig.hasBackupRole) {
@@ -563,7 +555,7 @@ private:
                 toSave.backupWeightCount           = nodeConfig.backupWeightCount;
                 toSave.resendGraceMs               = static_cast<uint32_t>(nodeConfig.resendGraceMs);
                 toSave.backupTargetPredecessorLayerId = nodeConfig.backupTargetPredecessorLayerId;
-                toSave.backupTargetBias            = nodeConfig.backupTargetBias;   // NEW
+                toSave.backupTargetBias            = nodeConfig.backupTargetBias;
                 memcpy(toSave.backupWeights, backupWeightStorage, sizeof(float) * nodeConfig.backupWeightCount);
             }
 
@@ -596,7 +588,7 @@ private:
         memcpy(weightStorage, saved.weights, sizeof(float) * saved.weightCount);
         nodeConfig.weights = weightStorage;
         nodeConfig.predecessorLayerId = saved.predecessorLayerId;
-        nodeConfig.bias                = saved.bias;   // NEW
+        nodeConfig.bias                = saved.bias;
 
         windowConfig.ownLayerId            = nodeConfig.address.layerId;
         windowConfig.precedingSiblingsMask = saved.precedingSiblingsMask;
@@ -610,7 +602,7 @@ private:
             nodeConfig.backupWeightCount           = saved.backupWeightCount;
             nodeConfig.resendGraceMs               = static_cast<unsigned long>(saved.resendGraceMs);
             nodeConfig.backupTargetPredecessorLayerId = saved.backupTargetPredecessorLayerId;
-            nodeConfig.backupTargetBias            = saved.backupTargetBias;   // NEW
+            nodeConfig.backupTargetBias            = saved.backupTargetBias;
             memcpy(backupWeightStorage, saved.backupWeights, sizeof(float) * saved.backupWeightCount);
             nodeConfig.backupWeights = backupWeightStorage;
         }

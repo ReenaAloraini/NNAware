@@ -8,7 +8,6 @@
 //   ./protocol_compatibility <command>
 //   Reads one JSON object from stdin, writes one JSON object to stdout, exits.
 
-// C:\Users\Reena\OneDrive\Desktop\NN_Aware_Project\NNAware\desktop_tests\protocol_compatibility.cpp
 // Commands: serialize | deserialize | checksum | encode-address | decode-address
 
 #include <iostream>

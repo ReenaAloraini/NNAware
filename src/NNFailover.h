@@ -11,8 +11,6 @@
 // stores only one extra weight set (for the specific peer it backs up),
 // not the whole layer's weight matrix.
 //
-
-//
 // NNResendResponder is the RECEIVING side of step 2/3: a node that is
 // alive but simply hasn't transmitted yet recognizes its own address in an
 // incoming resend request and re-offers its already-computed output for
@@ -25,8 +23,7 @@
 // substitute has claimed it — the opposite of NNInputBuffer's existing
 // latest-wins retransmission tolerance: ordinary
 // retransmission should take the newest value, but a failover slot must
-// not flip later if the original arrives late. NNInputBuffer itself is
-// UNCHANGED.
+// not flip later if the original arrives late.
 
 #pragma once
 #include <cassert>
@@ -36,7 +33,7 @@
 #include "NNActivation.h"
 #include "NNNode.h"
  
-// Reuses NNPacketHeader::flags, previously entirely reserved/unused.
+// Carried in NNPacketHeader::flags.
 constexpr uint8_t NN_FLAG_FAILOVER_SUBSTITUTE = 0x01;
 // Set on a failover REPORT whose target could not be recovered at all -- the same
 // condition that makes buildTeardownPacket() emit a TEARDOWN.
@@ -129,11 +126,10 @@ public:
             layerObservedMask |= (uint16_t(1) << src.nodeId);
         }
  
-        // FIX (mirrors the identical fix in NNNode::onPacketReceived):
-        // filter by the sender's layer BEFORE matching by node ID. Without
-        // this, a node ID reused in a different layer than
-        // backupTargetPredecessorLayerId could be mistaken for one of the
-        // backup target's real predecessors, corrupting the substitute
+        // As in NNNode::onPacketReceived, filter by the sender's layer BEFORE
+        // matching by node ID. Without this, a node ID reused in a different
+        // layer than backupTargetPredecessorLayerId could be mistaken for one
+        // of the backup target's real predecessors, corrupting the substitute
         // computation with the wrong sender's value.
         if (src.layerId == cfg.backupTargetPredecessorLayerId &&
             (cfg.backupTargetPredecessorMask & (uint16_t(1) << src.nodeId))) {
@@ -263,10 +259,10 @@ private:
         // Same senderId-ascending weight-consumption order as
         // NNNode::execute() — backupWeights must be provided in that same
         // order for cfg.backupTargetPredecessorMask.
-        // PATCHED: starts from cfg.backupTargetBias, mirroring the target's
-        // own execute() starting from config.bias -- otherwise a substitute
-        // silently drops the target's bias term (see NNNodeConfig above).
-        float sum = cfg.backupTargetBias;   // was: float sum = 0.0f;
+        // Starts from cfg.backupTargetBias, mirroring the target's own
+        // execute() starting from config.bias -- otherwise a substitute
+        // silently drops the target's bias term (see NNNodeConfig).
+        float sum = cfg.backupTargetBias;
         uint8_t weightIndex = 0;
         for (uint8_t senderId = 0; senderId < NN_MAX_PREDECESSORS; senderId++) {
             if (!(cfg.backupTargetPredecessorMask & (uint16_t(1) << senderId))) continue;
@@ -306,7 +302,7 @@ private:
  
     const NNNodeConfig& cfg;
     ClockFn getTimeMs;
-    NNInputBuffer inputBuffer;   // reused, real, UNCHANGED class from NNBuffer.h
+    NNInputBuffer inputBuffer;
     bool targetObserved = false;
     uint16_t layerObservedMask = 0;  // every sibling observed transmitting this pass
     bool resendRequested = false;
@@ -403,8 +399,8 @@ private:
     uint16_t lockedMask = 0;
 };
  
-// --- Desktop-only backup-config validation (see top-of-file note) ---------
- 
+// --- Desktop-only backup-config validation --------------------------------
+
 struct NNBackupConfigValidationResult {
     static constexpr uint8_t MAX_ISSUES = 8;
  
@@ -461,7 +457,7 @@ inline NNBackupConfigValidationResult validateBackupConfig(
         result.addIssue("backupWeightCount does not match the target's REAL weightCount");
     }
  
-    // NEW: bias must be mirrored too, for the same reason as every other
+    // Bias must be mirrored too, for the same reason as every other
     // backupTarget* field above -- see NNNodeConfig::backupTargetBias.
     if (backupCfg.backupTargetBias != targetRealCfg.bias) {
         result.addIssue("backupTargetBias does not match the target's REAL bias");

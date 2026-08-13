@@ -34,7 +34,7 @@ def build_packet(node_id: int, layer_id: int, target_layer_id: int,
     # Pack header with checksum=0 first, to compute the checksum over it
     header_without_checksum = struct.pack(
         ">HBBBBB", source_address, target_layer_id, packet_type,
-        sequence & 0xFF, payload_count, 0  # 0 = flags placeholder, confirm meaning in your header
+        sequence & 0xFF, payload_count, 0  # flags
     )
     checksum = compute_checksum(header_without_checksum, payload_bytes)
 

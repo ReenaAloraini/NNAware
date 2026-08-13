@@ -1,6 +1,6 @@
 """Map a ModelSpec onto the NNAware library's node model.
 
-v1 mapping rules (see accompanying chat discussion for the reasoning):
+v1 mapping rules:
 
   - One physical device per neuron IN A COMPUTE LAYER. The input layer
     (layer 0) is VIRTUAL, not hardware -- confirmed directly by
@@ -16,13 +16,13 @@ v1 mapping rules (see accompanying chat discussion for the reasoning):
   - Every neuron in layer i is fully connected to every neuron in layer i-1,
     so predecessorMask is simply "all node_ids in layer i-1", built at once
     rather than edge-by-edge.
-  - Bias is a native field on NNNodeConfig (as of the library patch adding
-    `float bias` + `sum = config.bias` in execute()) — each computed neuron
-    carries its own bias value directly, no synthetic predecessor needed.
-  - predecessor_layer_id is explicit per node (NNNodeConfig's cross-layer
-    collision fix — a node must state which layer its predecessorMask's
-    node IDs actually live in, not assume layer_id - 1). Always the
-    previous node-layer here, since v1 is a straight feed-forward stack.
+  - Bias is a native field on NNNodeConfig, so each computed neuron carries
+    its own bias value directly, no synthetic predecessor needed.
+  - predecessor_layer_id is explicit per node: a node must state which layer
+    its predecessorMask's node IDs actually live in rather than assume
+    layer_id - 1, so that node IDs reused across layers can't collide.
+    Always the previous node-layer here, since v1 is a straight
+    feed-forward stack.
   - preceding_siblings_mask (feeds NNScheduler's NNWindowConfig) is derived
     from transmit_slot order within a layer: node nid's mask covers every
     node_id < nid in the same layer, matching transmit_slot == node_id.

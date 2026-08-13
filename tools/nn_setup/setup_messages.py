@@ -7,10 +7,6 @@ equivalent struct bytes (NOT wire bytes -- pass the result to
 wire_format.build_packet() before sending). Each unpack_* function takes
 the already word-reversed-back struct bytes that wire_format.parse_packet()
 hands back.
-
-PATCHED: pack_topology_info() gained a `bias` parameter and
-pack_backup_role_info() gained a `backup_target_bias` parameter, mirroring
-NNTopologyInfoMsg/NNBackupRoleInfoMsg's new fields in NNSetupProtocol.h.
 """
 import struct
 

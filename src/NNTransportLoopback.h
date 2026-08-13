@@ -10,7 +10,7 @@ public:
     bool begin() override { return true; }
 
     bool send(const NNPacket& pkt) override {
-        return queue.push(pkt);  // 
+        return queue.push(pkt);
     }
 
     bool receive(NNPacket& outPkt) override {

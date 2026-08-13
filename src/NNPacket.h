@@ -10,14 +10,11 @@ enum class NNPacketType : uint8_t {
     DATA     = 0,  // carries a node's activation output(s)
     CONTROL  = 1,  // for scheduling/sync messages
     ACK      = 2,   // reserved for a future reliability layer
-    TEARDOWN = 3,  // RESERVED, not yet dispatched by any current logic
-                    // (deferred by explicit decision until after the framework's
-                    // UI is built). Intended meaning, for when it is wired up:
-                    // broadcast when a layer cannot recover via backup weights +
+    TEARDOWN = 3,  // broadcast when a layer cannot recover via backup weights +
                     // retransmission (e.g. a node AND its designated backup have
                     // both failed), signaling receivers to abort the current
                     // inference pass rather than hang or produce a wrong result.
-                    // See NNFailover.h -- NNBackupStandby::resolveWithNoRecovery().
+                    // See NNFailover.h -- NNBackupStandby::buildTeardownPacket().
 };
 
 struct NNPacketHeader {
@@ -26,7 +23,8 @@ struct NNPacketHeader {
     NNPacketType type;            
     uint8_t      sequenceNumber;  // increments per send from this node (for retransmission)
     uint8_t      payloadCount;    // how many of the payload floats are valid out of the max limit  
-    uint8_t      flags;           // reserved for future use (advanced configurations)
+    uint8_t      flags;           // failover flags at runtime (NNFailover.h), setup opcode during
+                                  // setup (NNSetupProtocol.h)
     uint8_t      checksum;        // simple additive checksum 
 };
 

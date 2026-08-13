@@ -34,22 +34,16 @@ provisioned with no backup duty (NNNodeConfig::hasBackupRole stays false,
 its own default), matching NNSetupAgent's behavior of never sending
 BACKUP_ROLE_INFO/BACKUP_WEIGHTS_CHUNK to such a device.
 
-PATCHED: "bias" is now a recognized top-level device field, and
-"backupTargetBias" is now a recognized backupRole field -- both mirror the
-same additions to NNNodeConfig in NNNode.h. Both are OPTIONAL and default
-to 0.0 when absent, matching NNNodeConfig::bias's own default in NNNode.h
--- required-with-no-default would reject every manifest/generator written
-before this field existed (confirmed: it broke tools/nn_setup's own
-generate_manifest.py output). A manifest that needs a real bias sets it
-explicitly; one that doesn't is unaffected.
+"bias" (top-level) and "backupTargetBias" (inside backupRole) are both
+OPTIONAL and default to 0.0 when absent, matching NNNodeConfig::bias's own
+default in NNNode.h. A manifest that needs a real bias sets it explicitly.
 
-PATCHED: "inputValue" is now a recognized OPTIONAL top-level device field,
-present only for a predecessorMask==0 device (a real physical input-layer
-node) -- setup_tool.py sends it as a dedicated INPUT_VALUE setup message,
-deliberately separate from "bias" (see NNSetupProtocol.h's NNInputValueMsg).
-Absent for every other device; no default is applied here since setup_tool.py
-itself only emits the packet when the key is present (None/absent both mean
-"don't send it").
+"inputValue" is an OPTIONAL top-level field, present only for a
+predecessorMask==0 device (a real physical input-layer node) -- setup_tool.py
+sends it as a dedicated INPUT_VALUE setup message, deliberately separate from
+"bias" (see NNSetupProtocol.h's NNInputValueMsg). Absent for every other
+device; no default is applied here since setup_tool.py only emits the packet
+when the key is present (None/absent both mean "don't send it").
 """
 import json
 

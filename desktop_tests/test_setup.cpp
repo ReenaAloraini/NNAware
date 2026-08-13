@@ -445,7 +445,7 @@ int main() {
     }
 
     // --- TEST 8: INPUT_VALUE pushes a seed value independent of bias, ACKed
-    //             like any other setup message, readable via the new accessors ---
+    //             like any other setup message, readable via the accessors ---
     {
         NNTransportLoopback transport;
         TestConfigStore store;

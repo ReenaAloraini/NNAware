@@ -136,15 +136,11 @@ with col_upload:
     use_example = st.button("Reset to AND-gate example", width="stretch")
 
 with col_edit:
-    # BUGFIX: st.text_area below is keyed ("model_json_editor"). Once that key
-    # exists in session_state, Streamlit reads the widget's displayed value
-    # from session_state[key] directly -- passing a new value= on a later
-    # rerun is silently ignored. The previous version wrote uploads/resets
-    # into a SEPARATE mirror variable (model_json_text) and passed THAT as
-    # value=, which is why uploading a file or clicking "Reset to AND-gate
-    # example" appeared to do nothing: the widget never actually saw it. The
-    # fix is to write directly into session_state["model_json_editor"] (the
-    # widget's own key) and stop passing value= at all.
+    # st.text_area below is keyed ("model_json_editor"). Once that key exists
+    # in session_state, Streamlit reads the widget's displayed value from
+    # session_state[key] directly -- passing a new value= on a later rerun is
+    # silently ignored. So uploads/resets must be written straight into
+    # session_state["model_json_editor"], never mirrored through value=.
     if "model_json_editor" not in st.session_state:
         st.session_state["model_json_editor"] = example_text
     if use_example:
@@ -302,9 +298,9 @@ with st.expander("Backup roles (optional -- fault tolerance)"):
 
     if backup_selection:
         st.info(
-            "Flash **examples/FailoverNode** to every board. examples/SetupAndRun and "
-            "examples/RunningNode don't include NNFailover.h -- they accept the backup "
-            "config, report it as configured, and then silently never act on it."
+            "Flash **examples/FailoverNode** to every board -- it is the only sketch that "
+            "includes NNFailover.h. Any sketch without it will accept the backup config, "
+            "report it as configured, and then silently never act on it."
         )
     else:
         st.caption("No backup roles selected -- this deploys exactly as before.")

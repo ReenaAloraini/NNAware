@@ -19,8 +19,7 @@ in for those here, exactly as it does in the library's own tests.
 Requires tools/nn_setup/ to be an importable sibling directory (the real
 repo layout: tools/nn_mapper/ and tools/nn_setup/ side by side) -- see
 _import_nn_setup(). Also requires a g++ toolchain and a local copy of
-src/ (the patched NNNode.h/NNFailover.h/NNSetupProtocol.h plus their
-unchanged dependencies) to actually compile and run the generated test.
+src/ to actually compile and run the generated test.
 """
 from __future__ import annotations
 
@@ -116,12 +115,11 @@ def build_round_trip_vectors(
     # JSON file device_manifest.load_manifest() reads below.
     raw_devices = generate_manifest.build_devices(network_json, list(hardware_ids))
 
-    # There is no in-memory "parse a list of dicts" entry point on the real
-    # device_manifest module -- only load_manifest(path), which is exactly what
-    # setup_tool.py itself calls in production (fed by generate_manifest.py's own
-    # devices.json output). Round-tripping through a real temp JSON file here, rather
-    # than reimplementing load_manifest's validation/defaulting logic, keeps this
-    # harness exercising the REAL code path end-to-end instead of a shortcut around it.
+    # Goes through load_manifest(path) rather than the in-memory
+    # device_manifest.parse_devices(): load_manifest is exactly what setup_tool.py
+    # calls in production (fed by generate_manifest.py's own devices.json output),
+    # so round-tripping through a real temp JSON file keeps this harness on the
+    # REAL code path, JSON serialization included.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_manifest:
         json.dump(raw_devices, tmp_manifest)
         tmp_manifest_path = tmp_manifest.name
