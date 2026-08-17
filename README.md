@@ -35,7 +35,7 @@ Before flashing, edit the settings in sketch:
 
 - `WIFI_SSID` and `WIFI_PASSWORD`:  network credentials
 - `BROADCAST_ADDR`: subnet's broadcast address 
-- `NN_HARDWARE_ID` — **must be unique for each device**
+- `NN_HARDWARE_ID`: **must be unique for each device**
 
 
 ### 2. Run the application
