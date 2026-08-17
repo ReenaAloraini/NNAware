@@ -1,5 +1,5 @@
 """
-NNAware Mapper -- Streamlit UI
+NNAware Mapper, Streamlit UI
 
 High-level tool: load a pretrained, fully-connected, inference-only network,
 map it onto one physical NNAware device per neuron, scan for and select real
@@ -118,20 +118,20 @@ def _deploy_to_devices(devices, broadcast_addr, port, retries, timeout, hello_wi
 
 st.set_page_config(page_title="NNAware Mapper", layout="wide")
 st.title("NNAware Mapper")
-st.caption("Map a pretrained, fully-connected network onto NNAware IoT devices, then run it for real.")
+st.caption("Map a pretrained, fully-connected network onto physically-seperated IoT devices, then run inference.")
 
 
 # ---------------------------------------------------------------------------
 # 1. Your network
 # ---------------------------------------------------------------------------
-st.header("1. Your network")
+st.header("1. Network Configurations")
 
 with open(EXAMPLE_PATH) as f:
     example_text = f.read()
 
 col_upload, col_edit = st.columns([1, 2])
 with col_upload:
-    uploaded = st.file_uploader("Upload a model JSON", type=["json"])
+    uploaded = st.file_uploader("Upload a model in JSON format", type=["json"])
     st.caption("Or edit the JSON directly →")
     use_example = st.button("Reset to AND-gate example", width="stretch")
 
@@ -231,8 +231,7 @@ with st.expander("Backup roles (optional -- fault tolerance)"):
         "sibling goes silent, this device first asks it to retransmit; if it still doesn't "
         "answer, this device computes the missing output itself from a copy of the sibling's "
         "weights and broadcasts it under the sibling's own identity, so the next layer never "
-        "notices. Costs no extra hardware -- backup duty rides on a device that already has "
-        "a job."
+        "notices."
     )
 
     for layer_index, layer in enumerate(model.layers[1:]):
@@ -318,7 +317,7 @@ except ValueError as e:
 # Shared network settings (used by scanning, setup, and running)
 # ---------------------------------------------------------------------------
 with st.expander("Network settings (defaults work for most local networks)"):
-    st.caption("Setup uses UDP broadcast; running uses UDP multicast -- separate ports in case your firmware uses different ones.")
+    st.caption("Setup uses UDP broadcast; running uses UDP multicast")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Setup (provisioning)**")
@@ -428,7 +427,7 @@ elif st.button("Start setup", type="primary"):
 # 4. Run
 # ---------------------------------------------------------------------------
 st.header("4. Run")
-st.caption("Sends your input to the real devices and waits for the real prediction, over UDP multicast.")
+st.caption("Sends your input to the real devices and waits for the real prediction.")
 
 input_size = model.layers[0].size
 
@@ -579,99 +578,3 @@ if "run_outcome" in st.session_state:
             })
         st.dataframe(node_rows, width="stretch", hide_index=True)
 
-with st.expander("Quick desktop check (no hardware -- pure Python prediction for comparison)"):
-    if st.button("Simulate this input"):
-        try:
-            sim_input = _parse_test_input(run_input_text, input_size)
-            sim_output = simulate_mod.simulate(node_layers, sim_input)
-            st.write("Simulated prediction:", sim_output)
-        except ValueError as e:
-            st.error(f"Couldn't parse input: {e}")
-    if input_size <= 4:
-        input_cases = [[float((combo >> i) & 1) for i in range(input_size)] for combo in range(2 ** input_size)]
-        sim_rows = [{"input": case, "output": simulate_mod.simulate(node_layers, case)} for case in input_cases]
-        st.dataframe(sim_rows, width="stretch", hide_index=True)
-
-
-# ---------------------------------------------------------------------------
-# Advanced: manual export (optional, for people who don't want to deploy from here)
-# ---------------------------------------------------------------------------
-with st.expander("Advanced: export files manually"):
-    st.caption("Not needed for the flow above -- only useful if you want the raw files for your own records or scripts.")
-
-    network_json_text = json.dumps(network_json, indent=2)
-    st.download_button(
-        "Download network.json", data=network_json_text,
-        file_name="network.json", mime="application/json",
-    )
-    st.code(network_json_text, language="json")
-
-    st.markdown("**Real device manifest (devices.json), built with generate_manifest.py:**")
-    if len(selected_ids) == n_devices and n_devices > 0:
-        try:
-            generate_manifest, *_rest = _import_nn_setup(nn_setup_dir)
-            raw_devices = generate_manifest.build_devices(
-                network_json, [f"0x{h:016X}" for h in selected_ids],
-            )
-            devices_json_text = json.dumps(raw_devices, indent=2)
-            st.download_button(
-                "Download devices.json", data=devices_json_text,
-                file_name="devices.json", mime="application/json",
-            )
-            st.code(devices_json_text, language="json")
-        except Exception as e:
-            st.error(f"{type(e).__name__}: {e}")
-    else:
-        st.caption("Select your devices in section 2 to generate this.")
-
-    st.markdown("**Per-node C++ header preview (debug only, from the mapper's own topology):**")
-    for n in phys:
-        st.code(to_cpp_header(n), language="cpp")
-
-
-# ---------------------------------------------------------------------------
-# Advanced: verify before deploying (optional, desktop-only)
-# ---------------------------------------------------------------------------
-with st.expander("Advanced: verify before deploying (optional, desktop-only)"):
-    st.caption(
-        "A desktop-only pre-flight check, run instead of deploying -- not a re-run of "
-        "anything on real hardware. It feeds your mapped network through the actual "
-        "provisioning code and the actual device-side C++ code (using a loopback "
-        "stand-in for the wireless link), and confirms the result matches this "
-        "network's own prediction. No physical device is touched or required."
-    )
-    st.caption(
-        "Note: this check rebuilds the network description on its own, so it verifies the "
-        "network WITHOUT any backup roles you selected above. It still proves the weights, "
-        "topology and predictions are right -- it just doesn't cover backup provisioning."
-    )
-
-    if SRC_DIR_EXISTS:
-        src_dir = DEFAULT_SRC_DIR
-    else:
-        st.warning("Couldn't auto-locate the library's src/ folder -- set it manually below.")
-        src_dir = st.text_input("library src/ directory (patched headers)", value=DEFAULT_SRC_DIR)
-
-    if n_devices == 0:
-        st.info("No physical devices in this topology yet.")
-    elif st.button("Run verification"):
-        if not os.path.isdir(nn_setup_dir):
-            st.error(f"nn_setup directory not found: {nn_setup_dir}")
-        elif not os.path.isdir(src_dir):
-            st.error(f"src directory not found: {src_dir}")
-        else:
-            placeholder_ids = [PLACEHOLDER_HW_ID_BASE + i for i in range(n_devices)]
-            with st.spinner("Running the desktop pre-flight check..."):
-                try:
-                    passed, output = run_round_trip_check(
-                        model, node_layers, placeholder_ids, src_dir, nn_setup_dir=nn_setup_dir,
-                    )
-                except Exception as e:
-                    passed, output = False, f"{type(e).__name__}: {e}"
-
-            if passed:
-                st.success("Verification PASSED -- this mapping is safe to deploy.")
-            else:
-                st.error("Verification FAILED -- do not deploy this mapping yet.")
-            with st.expander("Details"):
-                st.code(output, language="text")

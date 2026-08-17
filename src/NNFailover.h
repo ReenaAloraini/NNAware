@@ -2,28 +2,7 @@
 // retry before falling back to backup weights, and teardown dispatch when
 // even that fails.
 //
-// DESIGN: there is no separate "backup node" role. EVERY node's own
-// NNNodeConfig (NNNode.h) optionally carries a designated backup duty for
-// exactly ONE peer (hasBackupRole/backupTarget*/backupWeights fields).
-// This distributes fault-tolerance responsibility across every node in a
-// layer instead of concentrating it in one place — a dedicated backup
-// node would itself be a new single point of failure — and each node
-// stores only one extra weight set (for the specific peer it backs up),
-// not the whole layer's weight matrix.
-//
-// NNResendResponder is the RECEIVING side of step 2/3: a node that is
-// alive but simply hasn't transmitted yet recognizes its own address in an
-// incoming resend request and re-offers its already-computed output for
-// retransmission, if it has one. Without this, a resend request is a
-// message nobody answers — this is what makes retransmission (as opposed
-// to only backup-weight substitution) an actual recovery path for
-// transient packet loss, not just node death.
-//
-// NNDuplicateSuppressor enforces FIRST-ARRIVAL-WINS for a slot once a
-// substitute has claimed it — the opposite of NNInputBuffer's existing
-// latest-wins retransmission tolerance: ordinary
-// retransmission should take the newest value, but a failover slot must
-// not flip later if the original arrives late.
+
 
 #pragma once
 #include <cassert>
@@ -33,34 +12,18 @@
 #include "NNActivation.h"
 #include "NNNode.h"
  
-// Carried in NNPacketHeader::flags.
+
 constexpr uint8_t NN_FLAG_FAILOVER_SUBSTITUTE = 0x01;
-// Set on a failover REPORT whose target could not be recovered at all -- the same
-// condition that makes buildTeardownPacket() emit a TEARDOWN.
+// Set on a failover REPORT whose target could not be recovered at all 
 constexpr uint8_t NN_FLAG_FAILOVER_TEARDOWN   = 0x02;
 
 // Diagnostics multicast group: reported TO, never joined by any node.
-//
-// NNPacketHeader::targetLayerId is a full uint8_t and
-// NNTransportUDPMulticast::send() routes solely on it (239.1.0.<targetLayerId>),
-// but NNAddress::layerId is a 4-bit field -- so no real layer can ever be 254 and
-// this group is collision-free by construction, with no extra validation needed.
-// Sending to a multicast group requires no membership, so a backup ANYWHERE in
-// the network reaches the laptop in one hop, instead of the failure having to be
-// propagated forward layer by layer.
 constexpr uint8_t NN_DIAG_LAYER_GROUP = 254;
 
 // Builds the packet that tells the laptop a failover happened, naming BOTH the
 // node that failed and the node that stood in for it.
-//
-// The substitute packet itself cannot carry this. It deliberately masquerades as
-// the target (see computeSubstituteOutput below), so it names the failed node but
-// never the backup -- and appending the backup as a second payload float would
-// corrupt the next layer's weighted sum, since NNNode::execute() consumes one
-// weight per payload float. Hence a separate packet on a separate group.
-//
-// Encodes the failed node exactly as queueResendRequest() does: encodeAddress()
-// produces a value well within float32's exact-integer range.
+// The substitute packet itself cannot carry this. It deliberately acts as the target so it names the failed node but
+// never the backup and appending the backup as a second payload float would corrupt the next layer's weighted sum
 inline void buildFailoverReport(const NNAddress& backer, const NNAddress& failed,
                                 uint8_t flags, NNPacket& outPkt) {
     outPkt = NNPacket{};
@@ -76,22 +39,10 @@ class NNBackupStandby {
 public:
     using ClockFn = unsigned long (*)();
  
-    // NNBackupStandby(ownerCfg, clockFn): ownerCfg.backupTargetAddress MUST
-    // be a SIBLING -- same layerId as ownerCfg.address. This is a per-layer
-    // mechanism by design: nodes within a layer are already continuously
-    // observing every sibling's broadcast (the same traffic NNScheduler's
-    // own sibling-turn-ordering relies on), so a backup relationship
-    // crossing layers would need an entirely different detection mechanism
-    // and isn't what this class implements. Enforced with an assertion
-    // rather than silently accepting a misconfigured cross-layer pairing.
+ 
     NNBackupStandby(const NNNodeConfig& ownerCfg, ClockFn clockFn)
         : cfg(ownerCfg), getTimeMs(clockFn) {
         if (cfg.hasBackupRole) {
-            // In a release/embedded build without <cassert> wired up, this
-            // is a silent no-op if NDEBUG is defined -- callers should
-            // still validate configuration at startup in production.
-            // The check exists here specifically so a desktop test build
-            // catches a same-layer violation immediately, not in the field.
             #ifndef NDEBUG
             assert(cfg.backupTargetAddress.layerId == cfg.address.layerId &&
                    "NNBackupStandby: backupTargetAddress must be in the SAME layer "
@@ -110,47 +61,23 @@ public:
         NNAddress src = decodeAddress(pkt.header.sourceAddress);
  
         if (isBackupTargetAddress(src)) {
-            targetObserved = true;  // the target spoke for itself (original or a
-                                      // genuine response to our resend request) —
-                                      // our job this pass is done
+            targetObserved = true;  
             return;
         }
  
-        // Track EVERY sibling's transmission in this layer, not just the
-        // ones this node's own predecessorMask cares about — needed to
-        // know when "the round finished" for failure detection below.
-        // Mirrors NNScheduler::onPacketObserved's own layer-filtered
-        // tracking, kept separate here since NNBackupStandby doesn't have
-        // access to NNScheduler's private observedSiblingsMask.
+        // Track every sibling's transmission in this layer, not just the ones this node's own predecessorMask cares about 
         if (src.layerId == cfg.address.layerId) {
             layerObservedMask |= (uint16_t(1) << src.nodeId);
         }
  
-        // As in NNNode::onPacketReceived, filter by the sender's layer BEFORE
-        // matching by node ID. Without this, a node ID reused in a different
-        // layer than backupTargetPredecessorLayerId could be mistaken for one
-        // of the backup target's real predecessors, corrupting the substitute
-        // computation with the wrong sender's value.
+        
         if (src.layerId == cfg.backupTargetPredecessorLayerId &&
             (cfg.backupTargetPredecessorMask & (uint16_t(1) << src.nodeId))) {
             inputBuffer.storeInput(src.nodeId, pkt.payload, pkt.header.payloadCount);
         }
     }
  
-    // Call once per loop() iteration, same cadence as NNScheduler::tick().
-    //
-    // FAILURE DETECTION IS EVENT-DRIVEN, NOT CLOCK-BASED: this node
-    // already knows every node ID expected in its own layer
-    // (cfg.layerRosterMask). Once every OTHER sibling (excluding the
-    // target and this node itself) has been observed transmitting, and
-    // the target STILL hasn't, that's a complete, timing-free failure
-    // signal — "the round finished and my target never went." No clock is
-    // consulted for this part at all.
-    //
-    // A clock is used ONLY after that point: once failure is detected and
-    // a resend request is queued, there's no further "everyone
-    // transmitted" signal left to wait on (the round already completed),
-    // so the grace period for a reply is necessarily time-bounded.
+  
     void tick() {
         if (!cfg.hasBackupRole) return;
         if (targetObserved || resolved) return;
@@ -199,15 +126,7 @@ public:
     bool didSubstitute() const { return hasSubstituted; }
     bool didTearDown() const { return hasTornDown; }
 
-    // The failover REPORT for the operator, on a channel SEPARATE from
-    // hasOutputReady() above: that one is single-deep and already multiplexes the
-    // resend request, the substitute and the teardown, whereas a report has to
-    // coexist with the substitute rather than replace it.
-    //
-    // Queued by computeSubstituteOutput()/buildTeardownPacket() themselves, so the
-    // flag it carries is set by the very code that takes the action it describes --
-    // a caller cannot pair the wrong flag with the wrong branch. Mirrors
-    // NNResendResponder::hasResendReady()'s shape.
+  
     bool hasDiagnosticReady(NNPacket& outPkt) {
         if (!diagnosticPending) return false;
         outPkt = diagnosticPacket;
@@ -236,8 +155,7 @@ private:
                addr.clusterId == cfg.backupTargetAddress.clusterId;
     }
  
-    // Called from the two branches below, never by the caller -- see
-    // hasDiagnosticReady() for why the flag is chosen here rather than outside.
+  
     void queueDiagnostic(uint8_t flags) {
         buildFailoverReport(cfg.address, cfg.backupTargetAddress, flags, diagnosticPacket);
         diagnosticPending = true;
@@ -248,20 +166,13 @@ private:
         outgoingPacket.header.sourceAddress = encodeAddress(cfg.address);  // who is asking
         outgoingPacket.header.type = NNPacketType::CONTROL;
         outgoingPacket.header.payloadCount = 1;
-        // Encodes WHICH node's retransmission is being requested. Exact
-        // representation: encodeAddress() produces a value well within
-        // float32's exact-integer range (<= 2^16 << 2^24).
+      
         outgoingPacket.payload[0] = static_cast<float>(encodeAddress(cfg.backupTargetAddress));
         outputPending = true;
     }
  
     void computeSubstituteOutput() {
-        // Same senderId-ascending weight-consumption order as
-        // NNNode::execute() — backupWeights must be provided in that same
-        // order for cfg.backupTargetPredecessorMask.
-        // Starts from cfg.backupTargetBias, mirroring the target's own
-        // execute() starting from config.bias -- otherwise a substitute
-        // silently drops the target's bias term (see NNNodeConfig).
+ 
         float sum = cfg.backupTargetBias;
         uint8_t weightIndex = 0;
         for (uint8_t senderId = 0; senderId < NN_MAX_PREDECESSORS; senderId++) {
@@ -289,10 +200,8 @@ private:
  
     void buildTeardownPacket() {
         outgoingPacket = NNPacket{};
-        outgoingPacket.header.sourceAddress = encodeAddress(cfg.address);  // reported as OUR OWN
-                                                                             // address — teardown is a
-                                                                             // diagnostic broadcast, not
-                                                                             // an identity substitution
+        outgoingPacket.header.sourceAddress = encodeAddress(cfg.address);  
+
         outgoingPacket.header.type = NNPacketType::TEARDOWN;
         outgoingPacket.header.payloadCount = 0;
         hasTornDown = true;
@@ -317,24 +226,13 @@ private:
     NNPacket diagnosticPacket{};
 };
  
-// The RECEIVING side of a resend request. A node that is alive but simply
-// hasn't transmitted yet (its packet was lost, or it's mid-slot) uses this
-// to recognize its own address in an incoming resend request and re-offer
-// its already-computed output. Deliberately does NOT re-execute anything —
-// it only re-sends a value the node already computed this pass, supplied
-// externally by the caller (see haveOutputThisPass below), since NNNode's
-// own execution state is private and this class has no need to reach into
-// it — the orchestrating loop already knows whether it has a fresh output
-// to offer.
+// The receiving  side of a resend request. A node that is alive but simply hasn't transmitted 
+// yet uses this to recognize its own address in an incoming resend request and re-offer its already-computed output
 class NNResendResponder {
 public:
     explicit NNResendResponder(const NNAddress& ownAddress) : ownAddress(ownAddress) {}
  
-    // Call for every observed packet, alongside whatever output value this
-    // node has actually computed this pass (if any) and whether it's valid
-    // yet. Only remembers to respond if BOTH the request is genuinely
-    // addressed to this node AND a real output already exists to resend —
-    // a node with nothing computed yet has nothing useful to offer.
+
     void onPacketObserved(const NNPacket& pkt, bool haveOutputThisPass, float outputValue) {
         if (pkt.header.type != NNPacketType::CONTROL) return;
         if (pkt.header.payloadCount < 1) return;
@@ -344,10 +242,10 @@ public:
         if (requested.nodeId != ownAddress.nodeId ||
             requested.layerId != ownAddress.layerId ||
             requested.clusterId != ownAddress.clusterId) {
-            return;  // not addressed to us
+            return;  
         }
  
-        if (!haveOutputThisPass) return;  // nothing to resend yet
+        if (!haveOutputThisPass) return;  
  
         pendingResendValue = outputValue;
         resendPending = true;
@@ -372,14 +270,10 @@ private:
     float pendingResendValue = 0.0f;
 };
  
-// Applied by any RECEIVING node before handing an incoming packet to its
-// own NNNode::onPacketReceived() / NNScheduler::onPacketObserved(). Keeps
-// NNInputBuffer itself completely unmodified — a separate, composable
-// filter, not a change to the synchronization gate's own logic.
+
 class NNDuplicateSuppressor {
 public:
-    // Returns false if this packet should be DROPPED (a late-arriving
-    // "real" packet for a slot a substitute already claimed this pass).
+    // Returns false if this packet should be DROPPED 
     bool shouldAccept(const NNPacket& pkt) {
         NNAddress src = decodeAddress(pkt.header.sourceAddress);
         bool isSubstitute = (pkt.header.flags & NN_FLAG_FAILOVER_SUBSTITUTE) != 0;
@@ -399,8 +293,7 @@ private:
     uint16_t lockedMask = 0;
 };
  
-// --- Desktop-only backup-config validation --------------------------------
-
+// Desktop-only backup-config validation
 struct NNBackupConfigValidationResult {
     static constexpr uint8_t MAX_ISSUES = 8;
  
@@ -413,17 +306,11 @@ struct NNBackupConfigValidationResult {
         if (issueCount < MAX_ISSUES) {
             issues[issueCount++] = msg;
         }
-        // If MAX_ISSUES is exceeded, isValid still correctly reports
-        // false — only the LISTING of every individual issue is capped,
-        // never the overall validity verdict.
+        
     }
 };
  
-// Confirms a backup node's copy of its target's identity/activation/
-// predecessor/weight-count/bias information genuinely matches the target's
-// REAL, independently-authored NNNodeConfig. Returns every mismatch
-// found, not just the first — useful for a desktop tool reporting a full
-// diagnosis at once, and for testing each failure mode independently.
+
 inline NNBackupConfigValidationResult validateBackupConfig(
     const NNNodeConfig& backupCfg, const NNNodeConfig& targetRealCfg) {
  

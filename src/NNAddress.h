@@ -5,10 +5,10 @@
 // A decoded, human-friendly view of a 16-bit node address.
 // This struct never touches the network directly — it's a pure data model.
 struct NNAddress {
-    uint8_t nodeId;     // 0-15  : which physical node within its layer/cluster
-    uint8_t layerId;    // 0-15  : which NN layer this node belongs to
-    uint8_t clusterId;  // 0-15  : which cluster within the layer (for parallel groups)
-    uint8_t reserved;   // 0-15  : unused for now — reserved for future protocol versions
+    uint8_t nodeId;     // 0-15: which physical node within its layer/cluster
+    uint8_t layerId;    // 0-15: which NN layer this node belongs to
+    uint8_t clusterId;  // 0-15: which cluster within the layer (for parallel groups)
+    uint8_t reserved;   // 0-15: unused for now — reserved for future protocol versions
 };
 
 // Packs a decoded NNAddress into the 16-bit wire format used in every NNPacket header.

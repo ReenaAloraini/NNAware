@@ -5,21 +5,6 @@ REAL setup_tool.py packet-building -> REAL device-side NNSetupAgent
 (NNSetupProtocol.h) assembling NNNodeConfig -> REAL NNNode/NNScheduler
 inference -- reproduces the model's own predictions, without ever
 touching a physical Wio Terminal.
-
-This is NOT a substitute for flashing real hardware. It IS the same
-"prove it on the desktop first" discipline the project already uses
-everywhere else (NNAddress/NNPacket/NNNode's own g++ tests,
-test_reference_network.cpp): every byte that would cross the wire to a
-real device is built by the REAL Python provisioning code and consumed by
-the REAL C++ device-side code, compiled and run for real. What it can't
-catch: anything specific to actual radio behavior, timing, or the
-physical NNTransportBLE/UDP implementations -- NNTransportLoopback stands
-in for those here, exactly as it does in the library's own tests.
-
-Requires tools/nn_setup/ to be an importable sibling directory (the real
-repo layout: tools/nn_mapper/ and tools/nn_setup/ side by side) -- see
-_import_nn_setup(). Also requires a g++ toolchain and a local copy of
-src/ to actually compile and run the generated test.
 """
 from __future__ import annotations
 

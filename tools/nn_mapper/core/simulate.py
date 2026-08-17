@@ -1,10 +1,8 @@
 """Pure-Python re-implementation of NNNode::execute()'s semantics.
 
-Used to verify a mapped topology produces the right numbers *before* ever
-generating device configs or touching hardware — same "prove it on the
-desktop first" discipline the lab manual uses for NNAddress/NNPacket/NNNode.
-Not a substitute for the real g++ desktop test against NNNode.h; it's a
-fast check on the mapper's own output.
+Used to verify a mapped topology produces the right numbers before ever
+generating device configs or touching hardware, it's a fast check on the
+mapper's own output.
 """
 from __future__ import annotations
 

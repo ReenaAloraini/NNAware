@@ -17,57 +17,32 @@ struct NNNodeConfig {
                                        // meaningful only if hasBackupRole is true
     uint8_t  weightCount;
 
-    // --- Bias: added to the weighted sum before activation
-    float bias = 0.0f;
+    float bias = 0.0f;              // Bias: added to the weighted sum before activation
 
-    // --- Backup role: this node ALSO stands ready to compute on behalf
-    // of ONE other node, if that node fails to transmit in time. Leave
-    // hasBackupRole = false (the default) for a node configured with no
-    // backup duty. ---
+    // Backup role: this node ALSO stands ready to compute on behalf of ONE other node, if that node fails to transmit in time. 
     bool      hasBackupRole = false;
     NNAddress backupTargetAddress{};                // the peer this node backs up
-    uint16_t  backupTargetPredecessorMask = 0;       // THAT peer's own predecessor requirements
-                                                       // (may differ from this node's own predecessorMask)
+    uint16_t  backupTargetPredecessorMask = 0;       // That peer's own predecessor requirements
     NNActivationType backupTargetActivationType = NNActivationType::LINEAR;
     uint8_t   backupWeightCount = 0;                  // count for backupWeights above
  
-    // backupTargetBias: the peer's own bias value, mirrored here for
-    // the exact same reason backupTargetActivationType/backupTargetPredecessorMask
-    // are mirrored rather than assumed -- a backup computing a substitute
-    // output must reproduce the target's REAL computation, bias included.
-    // Without this, a node with a non-zero bias that fails would get a
-    // silently WRONG substitute output from its backup (missing offset),
-    // which is worse than an obviously-failed pass. See NNFailover.h.
-    float     backupTargetBias = 0.0f;
+    
+    float     backupTargetBias = 0.0f;              // backupTargetBias: the peer's own bias value
  
-    unsigned long resendGraceMs = 0;                  // the ONLY clock-based timing left: after
-                                                        // failure is DETECTED (event-driven, see
-                                                        // layerRosterMask below and NNFailover.h),
-                                                        // how long to wait for a resend reply before
-                                                        // falling back to backup-weight substitution
-    uint16_t  layerRosterMask = 0;                     // every node ID present in THIS node's own
-                                                        // layer (siblings + self) -- lets a backup
-                                                        // detect "the round finished and my target
-                                                        // never went" purely from observed traffic,
-                                                        // with no clock needed for detection itself
- 
+    unsigned long resendGraceMs = 0;                  // how long to wait for a resend reply before falling back 
+                                                    // to backup-weight substitution
+    uint16_t  layerRosterMask = 0;                     // every node ID present in THIS node's own layer
 
-    uint8_t   predecessorLayerId = 0;                  // which layer this node's OWN predecessors
-                                                        // (config.predecessorMask) actually live in
-    uint8_t   backupTargetPredecessorLayerId = 0;       // same idea, for the backup target's
-                                                        // predecessors (backupTargetPredecessorMask) --
-                                                        // meaningful only if hasBackupRole is true
+    uint8_t   predecessorLayerId = 0;                  // which layer this node's OWN predecessors live in
+
+    uint8_t   backupTargetPredecessorLayerId = 0;       
 };
  
 class NNNode {
 public:
     explicit NNNode(const NNNodeConfig& cfg) : config(cfg), hasExecuted(false), outputValue(0.0f) {}
  
-    // Called whenever a packet arrives. Filters by the sender's layer BEFORE
-    // matching by node ID: on a single shared broadcast medium, a node ID
-    // reused in a different layer (e.g. a Layer-0 input node sharing an ID
-    // with a Layer-1 node) would otherwise be silently mistaken for a real
-    // predecessor, corrupting the weighted sum with the wrong sender's value.
+    // Called whenever a packet arrives. Filters by the sender's layer before matching by node ID
     void onPacketReceived(const NNPacket& pkt) {
         NNAddress src = decodeAddress(pkt.header.sourceAddress);
         if (src.layerId != config.predecessorLayerId) return;  // reject cross-layer collision
@@ -95,13 +70,8 @@ public:
         hasExecuted = true;
     }
  
-    // For nodes with predecessorMask == 0 (input-layer sensors, or any
-    // future constant source) -- sets outputValue directly and marks the
-    // node executed, bypassing the weighted-sum path entirely. Without
-    // this, a zero-predecessor node's execute() sums zero terms and always
-    // emits activation(config.bias), never a real external reading.
-    // Call once per pass, before the scheduler drives transmission, for
-    // any node whose predecessorMask is 0.
+    // For nodes with predecessorMask == 0 (input-layer) sets outputValue directly 
+    // and marks the node executed, bypassing the weighted-sum path entirely.
     void seedOutput(float value) {
         outputValue = value;
         hasExecuted = true;
@@ -118,7 +88,7 @@ public:
         return pkt;
     }
  
-    // Must be called between inference passes, alongside inputBuffer.reset(), to avoid data leakage 
+    // Must be called between inference passes to avoid data leakage 
     void resetForNextPass() {
         inputBuffer.reset();
         hasExecuted = false;

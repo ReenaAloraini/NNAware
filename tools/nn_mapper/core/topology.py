@@ -1,41 +1,5 @@
-"""Map a ModelSpec onto the NNAware library's node model.
+##Map a ModelSpec onto the NNAware library's node model.
 
-v1 mapping rules:
-
-  - One physical device per neuron IN A COMPUTE LAYER. The input layer
-    (layer 0) is VIRTUAL, not hardware -- confirmed directly by
-    test_reference_network.cpp: "x0/x1 have no NNNode of their own,
-    matching the earlier design decision that raw sensor inputs are
-    simulated as directly-injected packets, not NNNode instances." Layer-0
-    node dicts still exist here (needed to compute layer-1's
-    predecessorMask and to drive simulate.py's truth-table check), but
-    codegen.py never emits them as devices or asks for a hardware_id.
-  - A layer's node_layer_id equals its position in ModelSpec.layers
-    (0 = virtual input layer, matching generate_manifest.py's own
-    convention of reserving layerId 0 for the raw input feed).
-  - Every neuron in layer i is fully connected to every neuron in layer i-1,
-    so predecessorMask is simply "all node_ids in layer i-1", built at once
-    rather than edge-by-edge.
-  - Bias is a native field on NNNodeConfig, so each computed neuron carries
-    its own bias value directly, no synthetic predecessor needed.
-  - predecessor_layer_id is explicit per node: a node must state which layer
-    its predecessorMask's node IDs actually live in rather than assume
-    layer_id - 1, so that node IDs reused across layers can't collide.
-    Always the previous node-layer here, since v1 is a straight
-    feed-forward stack.
-  - preceding_siblings_mask (feeds NNScheduler's NNWindowConfig) is derived
-    from transmit_slot order within a layer: node nid's mask covers every
-    node_id < nid in the same layer, matching transmit_slot == node_id.
-  - successor_layer_id is None for the terminal (last) layer internally;
-    codegen.py converts that to 255, matching test_reference_network.cpp's
-    own terminal sentinel (O0's successorLayerId = 255) -- NOT 0, since 0
-    is a real, meaningful layer id (the virtual input layer) here.
-  - hardware_id is left as None for compute-layer nodes -- the mapper has
-    no way to know which physical chip plays which role. Must be filled in
-    (see codegen.assign_hardware_ids()) before codegen.write_devices_json()
-    will produce a valid devices.json. Input-layer nodes never get one,
-    since they're never provisioned as devices at all.
-"""
 from __future__ import annotations
 
 from typing import Dict, List

@@ -3,40 +3,6 @@ Runtime inference client -- talks to REAL, ALREADY-PROVISIONED (post-START)
 NNAware devices over UDP multicast (NNTransportUDPMulticast) to inject input
 values and collect the final prediction, timing how long the real hardware
 took to answer.
-
-Wire format is confirmed against TWO independent sources: NNPacket.h's own
-serializePacket()/deserializePacket() (read directly from the library), and
-the teammate's own receiver.py/transmitter.py scripts, already tested
-against real hardware on a laptop. Both agree exactly: an 8-byte big-endian
-header (sourceAddress uint16, targetLayerId uint8, type uint8,
-sequenceNumber uint8, payloadCount uint8, flags uint8, checksum uint8)
-followed by payloadCount big-endian floats; checksum = additive sum of every
-byte (with the checksum byte itself zeroed) truncated to 8 bits. This module
-reimplements that format directly (matching transmitter.py/receiver.py
-field-for-field) rather than importing nn_setup's wire_format.py, since that
-module's reverse_words() trick is specific to setup-phase CONTROL messages
-(raw struct bytes reinterpreted as floats) -- runtime DATA packets carry
-real floats and use the plain big-endian encoding transmitter.py/
-receiver.py already use.
-
-NNTransportUDPMulticast's group convention (see NNTransportUDPMulticast.h):
-one multicast group per layer, 239.1.0.<layerId>. A device joins its OWN
-layer's group and sends to the group matching a packet's targetLayerId. So:
-  - Injecting a virtual input (layer 0) means sending to group <1> -- the
-    first compute layer's group, since generate_manifest.py always numbers
-    compute layers starting at 1 and every physical node's
-    predecessorLayerId is the layer directly before it.
-  - Collecting the final prediction means joining the group the TERMINAL
-    layer's own successorLayerId points at. generate_manifest.py always
-    sets successorLayerId = layer_id + 1, even for the last layer (that
-    group is otherwise unused by any real device -- its own docstring
-    calls this "the extra broadcast target is inert"), so this client must
-    explicitly join group <last_layer_id + 1> to catch it.
-
-Requires this machine to already be on the same network as the devices --
-same assumption setup_tool.py makes. No WiFi credentials are needed here,
-only on the device side. The machine also needs to be on a multicast-capable
-network; a host that silently drops multicast will see no results arrive.
 """
 from __future__ import annotations
 

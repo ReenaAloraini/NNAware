@@ -1,36 +1,9 @@
-// ============================================================================
-// NNSetupProtocol.h
-//
 // Setup-phase protocol: a laptop discovers unconfigured devices over the
 // same wireless link they'll use at runtime, assigns each one an NNAddress
 // + NNNodeConfig, ships its weights over in chunks, optionally assigns a
-// backup duty (NNNodeConfig::hasBackupRole, see NNFailover.h) and ships its
-// backup weights too, verifies the result, and finally tells everyone to
-// go live.
-//
-// Carried as NNPacketType::CONTROL packets. The opcode lives in
-// NNPacketHeader.flags. Every setup message
-// is laid out as a whole number of 4-byte words so it can ride through the
-// EXISTING serializePacket()/deserializePacket() functions unmodified --
-// those only understand "N floats", they don't know or care that the bytes
-// aren't really floats.
-//
-// TRANSPORT SIZE BUDGET: NNTransportUDP / NNTransportUDPMulticast currently
-// use 64-byte wire buffers -> 8 header bytes + 56 payload bytes -> 14 floats
-// max per packet. Every message below is sized to fit that ceiling exactly,
-// so this protocol works whether or not that transport buffer size ever
-// gets bumped to match NN_MAX_PAYLOAD_FLOATS (16).
-//
-// ORDERING ASSUMPTIONS: a device expects ASSIGN_ADDRESS before TOPOLOGY_INFO
-// (topology setup derives windowConfig.ownLayerId from the just-assigned
-// address), and TOPOLOGY_INFO before BACKUP_ROLE_INFO/BACKUP_WEIGHTS_CHUNK
-// (those are only accepted once the device has left UNCONFIGURED). The
-// laptop-side tool must send them in that order per device. BACKUP_ROLE_INFO
-// and the WEIGHTS_CHUNK/BACKUP_WEIGHTS_CHUNK streams are otherwise
-// order-tolerant with respect to each other -- a device that finishes its
-// primary weights before BACKUP_ROLE_INFO arrives simply waits (see
-// NNSetupAgent::maybeAdvanceToVerifying) rather than reporting success early.
-// ============================================================================
+// backup duty  and ships its backup weights too, verifies the result, and 
+// finally tells everyone to go live.
+
 #pragma once
 #include <stdint.h>
 #include <cstring>
@@ -38,12 +11,11 @@
 #include "NNAddress.h"
 #include "NNActivation.h"
 #include "NNTransport.h"
-#include "NNScheduler.h"   // for NNWindowConfig
-#include "NNNode.h"        // for NNNodeConfig
+#include "NNScheduler.h"   
+#include "NNNode.h"        
 
-// ----------------------------------------------------------------------
-// Opcodes -- stored in NNPacketHeader.flags when header.type == CONTROL
-// ----------------------------------------------------------------------
+
+// Opcodes: stored in NNPacketHeader.flags when header.type == CONTROL
 enum class NNSetupOpcode : uint8_t {
     HELLO          = 0x01, // device -> laptop: "I exist, unconfigured", carries hardwareId
     ASSIGN_ADDRESS = 0x02, // laptop -> device: assign NNAddress
@@ -55,24 +27,14 @@ enum class NNSetupOpcode : uint8_t {
     NACK           = 0x08, // device -> laptop: reject (bad chunk index, unknown hardwareId, etc.)
     START          = 0x09, // laptop -> all: leave setup mode, begin runtime operation
 
-    // Backup-role provisioning -- OPTIONAL per device. A device that never
-    // receives these simply keeps NNNodeConfig::hasBackupRole == false (its
-    // default). See NNFailover.h / NNBackupStandby for what these fields feed.
+    // Backup-role provisioning 
     BACKUP_ROLE_INFO     = 0x0A, // laptop -> device: assign backup duty + its scalar fields
     BACKUP_WEIGHTS_CHUNK = 0x0B, // laptop -> device: partial backupWeights array (reuses NNWeightsChunkMsg's layout -- only the opcode routes it to a different destination array)
 
-    // OPTIONAL -- only ever sent to a device with predecessorMask==0 (a real
-    // physical input-layer node, e.g. a sensor board). Pushes the raw value
-    // that device should seed into the network once RUNNING (via
-    // NNNode::seedOutput()), deliberately independent of NNNodeConfig::bias --
-    // bias and "the input reading" are different concepts even though a
-    // LINEAR-activation, zero-predecessor node would numerically pass either
-    // straight through. Devices with predecessorMask!=0 never receive this.
     INPUT_VALUE = 0x0C, // laptop -> device: push a seed input value
 };
 
-// 12 bytes of chunk header (hardwareId + 3 index bytes + 1 pad) + 11 floats
-// (44 bytes) = 56 bytes payload = exactly the 14-float wire ceiling.
+
 constexpr uint8_t NN_WEIGHTS_CHUNK_MAX_FLOATS = 11;
 constexpr uint8_t NN_SETUP_MAX_WEIGHTS        = 64; // device-side storage cap; raise if a node needs more
 constexpr uint8_t NN_SETUP_MAX_BACKUP_WEIGHTS = 64; // device-side storage cap for backupWeights
@@ -80,11 +42,7 @@ constexpr uint8_t NN_SETUP_MAX_BACKUP_WEIGHTS = 64; // device-side storage cap f
 constexpr uint8_t NN_SETUP_NACK_BAD_CHUNK_INDEX = 1; // chunkIndex >= this device's own expected chunk count
 constexpr uint8_t NN_SETUP_NACK_WRONG_STATE     = 2; // reserved -- not currently emitted
 
-// Every struct below is exactly a whole number of 4-byte words, so it maps
-// directly onto NNPacket.payload (float[16]) via memcpy, with payloadCount
-// set to sizeof(msg)/4. #pragma pack(1) keeps the C++ layout free of
-// compiler-inserted padding so it matches a hand-written Python struct.pack
-// format on the laptop side byte-for-byte.
+
 #pragma pack(push, 1)
 
 struct NNHelloMsg {
@@ -124,9 +82,7 @@ struct NNWeightsChunkMsg {
     float    values[NN_WEIGHTS_CHUNK_MAX_FLOATS];
 };
 
-// OPTIONAL -- only sent to a device that should also stand in as a backup
-// for one sibling. See NNNodeConfig (NNNode.h) / NNFailover.h for how these
-// fields are actually used once runtime starts.
+
 struct NNBackupRoleInfoMsg {
     uint64_t hardwareId;
     uint16_t backupTargetAddress;         // encodeAddress() of the peer this node backs up
@@ -136,12 +92,11 @@ struct NNBackupRoleInfoMsg {
     uint8_t  backupWeightCount;
     uint32_t resendGraceMs;               // fixed-width on the wire, regardless of local `unsigned long` width
     uint8_t  backupTargetPredecessorLayerId; // which layer backupTargetPredecessorMask's node IDs live in
-    float    backupTargetBias;            // mirrors NNNodeConfig::backupTargetBias (NNNode.h)
+    float    backupTargetBias;            
     uint8_t  _reserved[3] = {0, 0, 0};       // pads to a whole number of 4-byte words (28 bytes total)
 };
 
-// OPTIONAL -- only sent to a predecessorMask==0 device. Already a whole
-// number of 4-byte words (12 bytes = 3 words), no padding needed.
+
 struct NNInputValueMsg {
     uint64_t hardwareId;
     float    value;
@@ -170,18 +125,17 @@ struct NNNackMsg {
     uint64_t hardwareId;
     uint8_t  nackedSequenceNumber;
     uint8_t  nackedOpcode;
-    uint8_t  reasonCode;   // NN_SETUP_NACK_* above
+    uint8_t  reasonCode;   
     uint8_t  _reserved = 0;
 };
 
 struct NNStartMsg {
-    uint32_t magic = 0x4E4E5354; // 'NNST' -- sanity check against stray packets
+    uint32_t magic = 0x4E4E5354; 
 };
 
 #pragma pack(pop)
 
-// Pack/unpack helpers -----------------------------------------------------
-
+// Pack/unpack helpers 
 template <typename MsgT>
 inline void packSetupMessage(NNPacket& pkt, NNSetupOpcode op, const MsgT& msg, uint8_t sequenceNumber) {
     static_assert(sizeof(MsgT) % 4 == 0, "setup messages must be a whole number of 4-byte words");
@@ -206,12 +160,8 @@ inline NNSetupOpcode getSetupOpcode(const NNPacket& pkt) {
     return static_cast<NNSetupOpcode>(pkt.header.flags);
 }
 
-// ----------------------------------------------------------------------
-// Persistence -- implement per-platform (NVS/Preferences on ESP32, EEPROM
-// elsewhere). NNVolatileConfigStore below is a no-op default so everything
-// compiles and runs (without surviving a reboot) before flash storage is
-// wired up.
-// ----------------------------------------------------------------------
+
+// Persistence: implement per-platform
 struct NNPersistedConfig {
     bool     valid = false;
     uint16_t address;
@@ -223,11 +173,8 @@ struct NNPersistedConfig {
     uint8_t  weightCount;
     float    weights[NN_SETUP_MAX_WEIGHTS];
     uint8_t  predecessorLayerId = 0; // which layer predecessorMask's node IDs live in (cross-layer-collision fix)
-    float    bias = 0.0f;            // mirrors NNNodeConfig::bias (NNNode.h)
+    float    bias = 0.0f;            
 
-    // Backup role -- mirrors NNNodeConfig's own backup fields
-    // (NNNode.h). hasBackupRole == false is the common case: everything
-    // below is then meaningless and never read back out.
     bool     hasBackupRole = false;
     uint16_t backupTargetAddress = 0;          // encoded
     uint16_t backupTargetPredecessorMask = 0;
@@ -236,7 +183,7 @@ struct NNPersistedConfig {
     uint8_t  backupWeightCount = 0;
     uint32_t resendGraceMs = 0;
     uint8_t  backupTargetPredecessorLayerId = 0; // which layer backupTargetPredecessorMask's node IDs live in
-    float    backupTargetBias = 0.0f;            // mirrors NNNodeConfig::backupTargetBias (NNNode.h)
+    float    backupTargetBias = 0.0f;            
     float    backupWeights[NN_SETUP_MAX_BACKUP_WEIGHTS];
 };
 
@@ -255,16 +202,15 @@ public:
     void clear() override {}
 };
 
-// ----------------------------------------------------------------------
+
 // Device-side setup state machine
-// ----------------------------------------------------------------------
 enum class NNSetupState : uint8_t {
     LOADING,           // checking persisted config at boot
     UNCONFIGURED,       // announcing HELLO, waiting for assignment
     RECEIVING_CONFIG,   // got address + topology, collecting weight chunks
     VERIFYING,          // all chunks in, waiting on a COMMIT_REQUEST round-trip
     CONFIGURED,          // verified and (if a real store is wired up) persisted; waiting for START
-    RUNNING,            // setup complete -- caller should switch to normal NNNode/NNScheduler operation
+    RUNNING,            // setup complete 
 };
 
 class NNSetupAgent {
@@ -294,9 +240,6 @@ public:
     const NNNodeConfig& getNodeConfig() const { return nodeConfig; }
     const NNWindowConfig& getWindowConfig() const { return windowConfig; }
 
-    // Only meaningful for a predecessorMask==0 device (see INPUT_VALUE above).
-    // hasSeedInputValue() stays false for every other device, since they're
-    // never sent this opcode at all.
     float getInputValue() const { return pendingInputValue; }
     bool hasSeedInputValue() const { return hasInputValue; }
 
@@ -321,7 +264,6 @@ public:
         if (nowMs - lastAnnounceMs >= announceIntervalMs) {
             sendHello();
             lastAnnounceMs = nowMs;
-            // Jitter so dozens of devices booting together don't announce in lockstep.
             announceIntervalMs = 700 + static_cast<uint32_t>(hwId % 600);
         }
     }
@@ -339,17 +281,10 @@ private:
     uint8_t weightCount;
     uint64_t receivedChunkMask;   // bit per chunk index received (supports up to 64 chunks)
     uint8_t expectedChunkCount;
-
-    // Backup role -- unused (stays all-zero/false) for a device with no
-    // backup duty. nodeConfig.weights/backupWeights both end up pointing
-    // into THIS object's own RAM arrays, not flash.
     float backupWeightStorage[NN_SETUP_MAX_BACKUP_WEIGHTS];
     uint64_t receivedBackupChunkMask;
     uint8_t expectedBackupChunkCount;
 
-    // INPUT_VALUE -- only ever set for a predecessorMask==0 device. Independent
-    // of the primaryComplete()/backupComplete() gating below: doesn't block
-    // COMMIT_REQUEST, since it's orthogonal to topology/weights verification.
     float pendingInputValue = 0.0f;
     bool hasInputValue = false;
 
@@ -394,11 +329,7 @@ private:
         return (receivedBackupChunkMask & expectedMask) == expectedMask;
     }
 
-    // Called after every chunk-affecting handler (primary or backup). Also
-    // handles the case where BACKUP_ROLE_INFO shows up AFTER primary weights
-    // already finished (state already VERIFYING) -- backupComplete() will be
-    // false until backup chunks land, so this simply won't re-promote until
-    // then; see handleBackupRoleInfo's demotion back to RECEIVING_CONFIG.
+ 
     void maybeAdvanceToVerifying() {
         if (state != NNSetupState::RECEIVING_CONFIG) return;
         if (!primaryComplete() || !backupComplete()) return;
@@ -434,13 +365,7 @@ private:
         weightCount = 0;
         state = NNSetupState::RECEIVING_CONFIG;
         sendAck(NNSetupOpcode::TOPOLOGY_INFO, pkt.header.sequenceNumber);
-        // A weightCount==0 device (e.g. a real physical input-layer node,
-        // predecessorMask==0) has expectedChunkCount==0 and is therefore
-        // ALREADY primaryComplete() -- but nothing else would ever call
-        // maybeAdvanceToVerifying() for it, since that's normally only
-        // triggered by a WEIGHTS_CHUNK arriving and no chunk is ever sent to
-        // a device with zero weights. Without this call such a device would
-        // sit in RECEIVING_CONFIG forever.
+        
         maybeAdvanceToVerifying();
     }
 
@@ -462,12 +387,7 @@ private:
         maybeAdvanceToVerifying();
     }
 
-    // OPTIONAL -- only arrives for a device the laptop tool has assigned a
-    // backup duty to. If this shows up after primary weights already
-    // completed (state already VERIFYING), demote back to RECEIVING_CONFIG
-    // until the backup weight chunks land too -- a device must never report
-    // COMMIT success while hasBackupRole is true but backupWeights is
-    // incomplete (NNBackupStandby would then hold a stale/incomplete array).
+    
     void handleBackupRoleInfo(const NNPacket& pkt) {
         auto msg = unpackSetupMessage<NNBackupRoleInfoMsg>(pkt);
         if (msg.hardwareId != hwId) return;
@@ -522,8 +442,7 @@ private:
         auto msg = unpackSetupMessage<NNCommitRequestMsg>(pkt);
         if (msg.hardwareId != hwId) return;
 
-        // state == VERIFYING already implies primaryComplete() && backupComplete()
-        // (see maybeAdvanceToVerifying) -- no separate backup check needed here.
+       
         bool ok = (state == NNSetupState::VERIFYING);
         uint8_t checksum = ok
             ? computeChecksum(reinterpret_cast<const uint8_t*>(weightStorage), nodeConfig.weightCount * sizeof(float))

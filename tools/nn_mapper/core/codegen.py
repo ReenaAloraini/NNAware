@@ -1,20 +1,8 @@
 """Emit mapper output in three forms:
 
-  1. network.json (model_to_network_json/write_network_json) -- THE
-     RECOMMENDED PATH. Matches tools/nn_setup/generate_manifest.py's
-     schema, so `python generate_manifest.py --network <this file>
-     --hardware-ids hardware_ids.json` (or setup_tool.py's own
-     `--network/--hardware-ids` dynamic mode) does the per-node topology
-     expansion. Preferred over emitting devices.json directly: it avoids
-     duplicating generate_manifest.py's expansion logic here, and gets
-     backup-pair expansion and live HELLO-based dynamic device assignment
-     for free. This module names the backup PAIRS (the "backups" field,
-     from the app's per-layer selectors); generate_manifest.py derives
-     every other backup field from them. Built
-     straight from ModelSpec, not from node_layers -- topology.py's
-     per-node expansion is still used locally for validation/simulation
-     (constraints.py, simulate.py), just not for this export.
-  2. devices.json (to_devices_json/write_devices_json) -- matches
+  1. network.json (model_to_network_json/write_network_json): THE
+     RECOMMENDED PATH. Matches tools/nn_setup/generate_manifest.py's schema
+  2. devices.json (to_devices_json/write_devices_json): matches
      tools/nn_setup/device_manifest.py's schema exactly, for the case
      where you want a fully pre-assigned static manifest instead of going
      through generate_manifest.py (e.g. no dynamic pool, or debugging the
@@ -24,22 +12,10 @@
      the fallback per-device-flash path if OTA provisioning isn't used.
 
 The virtual input layer (layer 0) is NEVER emitted as a device and never
-needs a hardware_id -- confirmed by test_reference_network.cpp: raw inputs
-are directly-injected packets, not real NNNode instances. physical_nodes()
-below is the one place that filters it out; every other function in this
-module operates on whatever list it's given.
+needs a hardware_id 
 
-Terminal (last) layer uses successorLayerId = 255, matching
-test_reference_network.cpp's own sentinel for "no further layer" -- NOT 0,
-since 0 is the real, meaningful virtual-input layer id here. (network.json
-doesn't carry this field at all -- generate_manifest.py derives it itself.)
+Terminal (last) layer uses successorLayerId = 255
 
-devices.json requires a hardwareId per physical device that this mapper
-has no way to know on its own -- write_devices_json() raises if any
-compute-layer node's hardware_id hasn't been assigned yet. Assign them
-with assign_hardware_ids() below, or by setting node["hardware_id"]
-directly. network.json has no such requirement -- hardware assignment is
-generate_manifest.py's/setup_tool.py's job for that path.
 """
 from __future__ import annotations
 

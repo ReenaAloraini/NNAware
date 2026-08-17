@@ -1,35 +1,3 @@
-// NNTransportUDPMulticast.h
-// ---------------------------------------------------------------
-// A multicast variant of NNTransportUDP.
-//
-// Layer-addressed multicast: every NN layer L owns the group
-// 239.1.0.L. A node JOINS its own layer's group (so it receives that
-// layer's inputs) and SENDS to the group of pkt.header.targetLayerId.
-//
-// Because only that layer's nodes joined the group, the network does
-// the filtering for us -- a node never even sees traffic addressed to
-// another layer, so no software discard check is needed for real inputs.
-//
-// SIBLING OBSERVATION: sibling turn-taking (NNNodeConfig's
-// precedingSiblingsMask, via NNScheduler::onPacketObserved()) needs a
-// device to see its OWN SIBLINGS' transmissions too -- but siblings in the
-// SAME layer send their own outputs to the NEXT layer's group (their
-// successorLayerId), never to their own layer's group. With only one group
-// joined, a node with a nonzero precedingSiblingsMask would sit in
-// WAITING_FOR_TURN forever. So a device may optionally join a SECOND group
-// -- its own successorLayerId's group -- purely to OBSERVE (not consume as
-// real input) its own and its siblings' transmissions. Safe even if a stray
-// packet from that second group reaches onPacketReceived(): that
-// function's own predecessorLayerId check already rejects anything not
-// actually from this node's real predecessor layer (see NNNode.h), so no
-// extra filtering is needed here. A device with no siblings to wait for
-// (precedingSiblingsMask == 0 -- e.g. the only neuron in its layer) can
-// simply omit the second group by passing NN_NO_SIBLING_GROUP (the
-// default), avoiding the extra socket entirely.
-//
-// Implements the same NNTransport interface as NNTransportUDP and
-// NNTransportLoopback, so it is a drop-in replacement.
-// ---------------------------------------------------------------
 #pragma once
 #include "NNTransport.h"
 #include "NNPacket.h"
@@ -45,13 +13,6 @@ constexpr uint8_t NN_NO_SIBLING_GROUP = 255;  // pass this (the default) to skip
 
 class NNTransportUDPMulticast : public NNTransport {
 public:
-    // joinLayerId: the layer whose group this node listens on (its OWN layer) --
-    // where its real predecessor inputs arrive.
-    // siblingGroupLayerId: OPTIONAL second group to ALSO join, purely to observe
-    // sibling transmissions for NNScheduler's turn-taking -- pass this node's own
-    // successorLayerId (siblings send their output there, not to their own
-    // layer's group). Leave at the default (NN_NO_SIBLING_GROUP) if this node has
-    // no siblings to wait for (precedingSiblingsMask == 0).
     NNTransportUDPMulticast(const char* ssid, const char* password,
                             uint8_t joinLayerId, uint16_t port,
                             uint8_t siblingGroupLayerId = NN_NO_SIBLING_GROUP)
@@ -91,14 +52,13 @@ public:
         Serial.print("[NNTransportUDPMulticast] connected. IP: ");
         Serial.println(WiFi.localIP());
 
-        // Join this node's own layer group so its real inputs are delivered here.
         IPAddress group = layerGroup(joinLayerId);
         uint8_t ok = udp.beginMulticast(group, port);
         Serial.print("[NNTransportUDPMulticast] joined group ");
         Serial.print(group);
         Serial.println(ok ? "  [ok]" : "  [JOIN FAILED]");
 
-        // Optionally join a second group, purely to observe siblings.
+
         bool siblingOk = true;
         if (hasSiblingGroup()) {
             IPAddress sibGroup = layerGroup(siblingGroupLayerId);
@@ -111,8 +71,7 @@ public:
         return (ok != 0) && siblingOk;
     }
 
-    // Sends to the group of the packet's targetLayerId -- the destination
-    // group address is what encodes the target layer on the wire.
+   
     bool send(const NNPacket& pkt) override {
         uint8_t buffer[64];
         uint16_t len = serializePacket(pkt, buffer, sizeof(buffer));
@@ -120,7 +79,7 @@ public:
 
         udp.beginPacket(layerGroup(pkt.header.targetLayerId), port);
         udp.write(buffer, len);
-        bool ok = udp.endPacket();   // returns 1 on success per WiFiUDP convention
+        bool ok = udp.endPacket();   
 
         if (!ok) {
             Serial.println("[NNTransportUDPMulticast] send() FAILED at endPacket()");
@@ -128,10 +87,6 @@ public:
         return ok;
     }
 
-    // Checks the own-layer group first (real inputs), then the sibling-
-    // observation group if one was joined -- both feed the SAME receive()
-    // interface, so callers route every packet through onPacketReceived()
-    // AND onPacketObserved().
     bool receive(NNPacket& outPkt) override {
         return tryReceiveFrom(udp, outPkt)
             || (hasSiblingGroup() && tryReceiveFrom(udpSiblings, outPkt));
@@ -140,9 +95,6 @@ public:
     void poll() override {}
 
 private:
-    // One non-blocking drain attempt against a single socket. Shared by both
-    // groups so the buffer size and the read/deserialize validation live in
-    // exactly one place.
     static bool tryReceiveFrom(WiFiUDP& sock, NNPacket& outPkt) {
         if (sock.parsePacket() <= 0) return false;   // non-blocking
         uint8_t buffer[64];

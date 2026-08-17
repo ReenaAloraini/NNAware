@@ -1,29 +1,20 @@
-// Device-side firmware for testing the setup phase (src/NNSetupProtocol.h)
-// against real hardware. Flash this onto each Wio Terminal / Seeeduino
-// device, edit NN_HARDWARE_ID to a DIFFERENT value per physical device
-// first, then run tools/nn_setup/setup_tool.py from a laptop on the same
-// WiFi network to provision it over the air.
+
 #include "NNSetupProtocol.h"
 #include "NNTransportUDP.h"
 
-// ---------------------------------------------------------------------
-// EDIT THESE before flashing:
-// ---------------------------------------------------------------------
-const char* WIFI_SSID     = "your-wifi-ssid";
-const char* WIFI_PASSWORD = "your-wifi-password";
-const char* BROADCAST_ADDR = "192.168.1.255";  // your subnet's broadcast address
-const uint16_t SETUP_PORT  = 4210;             // must match setup_tool.py's --port
 
-// MUST be unique per physical device -- this is how the laptop tool and
-// this device recognize which manifest entry belongs to which board.
-// There's no automatic per-chip ID available here (unlike ESP32's
-// ESP.getEfuseMac()), so just pick a different constant for each device
-// you flash, e.g. 0x0000000000000001ULL, 0x0000000000000002ULL, ...
+// EDIT THESE before flashing:
+const char* WIFI_SSID     = "";
+const char* WIFI_PASSWORD = "";
+const char* BROADCAST_ADDR = "192.168.1.255";  
+const uint16_t SETUP_PORT  = 4210;             
+
+
 const uint64_t NN_HARDWARE_ID = 0x1122334455667788ULL;
-// ---------------------------------------------------------------------
+
 
 NNTransportUDP transport(WIFI_SSID, WIFI_PASSWORD, BROADCAST_ADDR, SETUP_PORT);
-NNVolatileConfigStore store;  // no persistence yet -- see NNSetupProtocol.h's own note on this
+NNVolatileConfigStore store;  
 NNSetupAgent agent(NN_HARDWARE_ID, transport, store);
 
 NNSetupState lastPrintedState = NNSetupState::LOADING;

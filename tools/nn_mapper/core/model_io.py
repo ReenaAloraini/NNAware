@@ -1,19 +1,5 @@
-"""Load a simple, transport-agnostic description of an offline-trained network.
+## Load a simple, transport-agnostic description of an offline-trained network.
 
-v1 scope (matches the NNAware library's current capabilities):
-  - fully connected layers only
-  - inference only (no on-device training)
-  - layer 0 is the input layer: {"size": N, "activation": "linear"}, no
-    weights/bias — it has no predecessors, its value is seeded externally
-    (a real sensor reading, or a fixed test value for a prototype like an
-    AND gate).
-  - every later layer: {"size": N, "activation": "relu"|"sigmoid"|"tanh"|"linear",
-    "weights": [[...]] (N rows, one per neuron, each of length prev_size),
-    "bias": [...] (N values, one per neuron)}
-
-Bias maps straight onto NNNodeConfig::bias (NNNode.h) — this module only
-validates and carries the values through.
-"""
 from __future__ import annotations
 
 import json

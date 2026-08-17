@@ -1,35 +1,11 @@
-// Device-side firmware: the full NNAware runtime -- setup phase over UDP
+// Device-side firmware: the full NNAware runtime, setup phase over UDP
 // broadcast, runtime inference over UDP multicast, and the fault-tolerance
 // layer from src/NNFailover.h (backup weights, resend requests, substitute
 // outputs and teardown).
 //
-// Flash this SAME sketch onto every physical device (edit NN_HARDWARE_ID to a
-// DIFFERENT value per board first), then provision from the NNAware Mapper app.
-// Which board carries backup duty is decided entirely by what the laptop sends
-// over the wire (BACKUP_ROLE_INFO + BACKUP_WEIGHTS_CHUNK) -- there is no
-// per-board firmware difference.
-//
-// WHAT A BACKUP ROLE DOES (see NNFailover.h's own header comment): every node
-// optionally stands ready to compute on behalf of exactly ONE SIBLING in its own
-// layer. If that sibling goes silent, this node first asks it to retransmit;
-// if it still doesn't answer within resendGraceMs, this node computes the
-// missing output itself from a mirrored copy of the sibling's weights and bias,
-// and broadcasts it under the SIBLING'S OWN identity so the next layer never
-// knows the difference.
-//
-// IMPORTANT NOTES:
-//
-// 1. The setup protocol has no "start a new inference pass" message, so this
-//    sketch decides for itself when a pass is over -- see closePass(). It
-//    deliberately does NOT reset immediately after transmitting: a backup node
-//    transmits its own output long before its detection window closes, and
-//    resetting there would discard the sibling observations the standby still
-//    needs. Sketch policy, not a library requirement.
-//
-// 2. Two behaviours here exist purely to make EVERY backup shape work, rather
-//    than restricting which sibling may back up which. Both are sketch-level
-//    policy built on public library API; neither patches the library. They are
-//    marked [F1] and [F2] below and explained at their implementation sites.
+//Flash this sketch onto each physical device so that the framework can recognize the devices
+// you have available, and change NN_HARDWARE_ID for each device
+
 #include "NNSetupProtocol.h"
 #include "NNTransportUDP.h"
 #include "NNTransportUDPMulticast.h"
@@ -37,80 +13,52 @@
 #include "NNScheduler.h"
 #include "NNFailover.h"
 
-// ---------------------------------------------------------------------
+
 // EDIT THESE before flashing:
-// ---------------------------------------------------------------------
+
 const char* WIFI_SSID     = "";
 const char* WIFI_PASSWORD = "";
-const char* BROADCAST_ADDR = "192.168.3.255";  // set for your 192.168.3.x/24 network -- re-check with
-                                                // `ipconfig /all` if your subnet mask isn't 255.255.255.0
+const char* BROADCAST_ADDR = "192.168.3.255";  
 const uint16_t SETUP_PORT   = 4210;            // must match the app's "Setup port" setting
-// Deliberately DIFFERENT from SETUP_PORT: this device has two separate WiFiUDP
-// sockets alive at once, and keeping them on separate ports also guarantees
-// setup-phase CONTROL traffic can never reach NNResendResponder, which reads
-// payload[0] of any CONTROL packet as an address (see runRuntimeStep).
 const uint16_t RUNTIME_PORT = 4211;            // must match the app's "Runtime port" setting
 
-// MUST be unique per physical device -- this is how the laptop tool and this
-// device recognize which manifest entry belongs to which board.
+// MUST be unique per physical device 
 const uint64_t NN_HARDWARE_ID = 0x0000000000000001ULL;
 // ---------------------------------------------------------------------
 
-// DATA packets have no ACK/retry layer and WiFi multicast frames get no
-// MAC-level ACK+retry, so a single send can simply be lost. Resend the
-// identical packet a few times. Safe to duplicate: NNInputBuffer::storeInput()
-// and NNScheduler::onPacketObserved() are both idempotent for a repeated
-// identical packet.
-//
-// These resends are deliberately NON-BLOCKING. Spacing them with delay() would
-// be simpler, but ~300ms of blocking would swallow most of a 300ms
-// resendGraceMs budget and drop incoming resend requests on the floor.
+
 const uint8_t  NN_DATA_RETRANSMITS       = 3;
 const uint16_t NN_DATA_RETRANSMIT_GAP_MS = 150;
 
-// [F2] How long a node may sit in WAITING_FOR_TURN before it stops waiting for
-// a silent preceding sibling and transmits anyway. See maybeReleaseStalledTurn().
+//How long a node may sit in WAITING_FOR_TURN before it stops waiting for a silent preceding sibling and transmits anyway
 const unsigned long NN_TURN_STALL_MS = 1500;
-// Backstop for closing a pass that never resolved. MUST stay comfortably larger
-// than NN_TURN_STALL_MS so stalled siblings get their chance to transmit first.
+
+// Backstop for closing a pass that never resolved.
 const unsigned long NN_PASS_IDLE_MS  = 5000;
 
 NNTransportUDP setupTransport(WIFI_SSID, WIFI_PASSWORD, BROADCAST_ADDR, SETUP_PORT);
-NNVolatileConfigStore store;  // no persistence yet -- see NNSetupProtocol.h's own note on this
+NNVolatileConfigStore store;  
 NNSetupAgent agent(NN_HARDWARE_ID, setupTransport, store);
 
 NNSetupState lastPrintedState = NNSetupState::LOADING;
 
-// Constructed only once setup finishes -- we don't know this device's layer or
-// role (and therefore which multicast group to join, or whether it has backup
-// duty at all) until then.
+
 NNTransportUDPMulticast* runtimeTransport = nullptr;
 NNNode*                  runtimeNode      = nullptr;
 NNScheduler*             runtimeScheduler = nullptr;
-// nullptr means "no backup duty" -- checked at every call site. Better than
-// constructing one and testing isActive(): NNBackupStandby owns a private
-// NNInputBuffer (16 x 16 floats = 1KB of RAM) that a node without backup duty
-// should never pay for.
+
 NNBackupStandby*         standby          = nullptr;
 NNResendResponder*       responder        = nullptr;
 NNDuplicateSuppressor    suppressor;   // by value, no heap
 
-// --- per-pass state owned by this sketch, not by the library ---------------
-// NNNode exposes no getter for its computed output, and NNResendResponder needs
-// that value handed to it, so we cache it at the one moment it is observable.
-// ownOutputSent doubles as "myOutputValue is valid", which is exactly what
-// NNResendResponder wants for its haveOutputThisPass argument.
+
 bool  ownOutputSent      = false;
 float myOutputValue      = 0.0f;
-// NNBackupStandby has no targetObserved() getter, so track it here for logging
-// and for deciding when a pass is resolved.
+
 bool  targetSeenThisPass = false;
-// Set once per pass so the duplicate-suppressor drop is reported once, not once
-// per dropped frame -- a substitute arrives NN_DATA_RETRANSMITS times, and
-// Serial.print blocks inside the receive-drain loop.
+
 bool  loggedSuppression  = false;
-// A predecessorMask==0 node's value is fixed at provisioning time, so it fires
-// exactly once and must never be reset -- see startRuntime() for why.
+
 bool  passManaged        = true;
 
 unsigned long lastActivityMs   = 0;
@@ -122,8 +70,7 @@ struct RetxSlot {
     uint8_t       left;
     unsigned long dueMs;
 };
-// Named so a new packet kind is one enum line rather than a literal slot index at
-// the call site plus a hand-updated bound in every loop below.
+
 enum RetxSlotId : uint8_t {
     RETX_OWN_OUTPUT = 0,  // this node's own computed output
     RETX_SUBSTITUTE,      // an output computed on a failed sibling's behalf
@@ -147,11 +94,7 @@ const char* stateName(NNSetupState s) {
     return "UNKNOWN";
 }
 
-// The bits NNBackupStandby::tick() waits on before it will declare the round
-// finished: every node in this layer EXCEPT the backup target and this node
-// itself. Mirrors the othersMask computation in NNBackupStandby::tick().
-// Printed at startup because it is the single number that tells you whether a
-// given backup pairing can detect a failure at all.
+
 uint16_t backupOthersMask(const NNNodeConfig& cfg) {
     return cfg.layerRosterMask
          & ~(uint16_t(1) << cfg.backupTargetAddress.nodeId)
@@ -207,24 +150,7 @@ void printNodeConfig() {
     Serial.println("=======================================");
 }
 
-// ---------------------------------------------------------------------------
-// Sending
-// ---------------------------------------------------------------------------
 
-// EVERY packet builder in NNFailover.h -- queueResendRequest(),
-// computeSubstituteOutput(), buildTeardownPacket() and
-// NNResendResponder::hasResendReady() -- starts from a fresh NNPacket{} and
-// never assigns header.targetLayerId, so it stays 0. NNNode::buildOutputPacket()
-// is the ONLY builder in the whole library that sets it.
-// NNTransportUDPMulticast::send() routes solely on that field
-// (layerGroup(targetLayerId) == 239.1.0.<targetLayerId>), so an un-fixed
-// failover packet is multicast to 239.1.0.0 -- a group no compute node ever
-// joins -- and is silently lost. Every send in this sketch therefore goes
-// through here with an explicit destination layer.
-// what == nullptr sends QUIETLY. Serial.print blocks, and the failover report goes
-// out inside the recovery window immediately before the substitute the next layer
-// is waiting on -- logging there would spend part of a resendGraceMs budget that
-// can be as low as 50ms. Its caller logs after the substitute is away instead.
 void sendOnce(NNPacket& pkt, uint8_t targetLayerId, const char* what) {
     pkt.header.targetLayerId = targetLayerId;
     runtimeTransport->send(pkt);
@@ -252,24 +178,7 @@ void serviceRetransmits() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// [F2] Turn-stall release
-// ---------------------------------------------------------------------------
-// Devices transmit in node-id order: precedingSiblingsMask == (1 << nodeId) - 1
-// (generate_manifest.py), and NNScheduler holds a node in WAITING_FOR_TURN
-// until every preceding sibling has been observed. So if node T dies, EVERY
-// node with a higher id waits on it forever -- they never transmit, which in
-// turn means T's backup never sees "the round finished" and never substitutes.
-// The whole layer deadlocks silently: no request, no substitute, no teardown.
-//
-// The fix is to stop waiting. NNScheduler::onPacketObserved() reads ONLY the
-// source address and ORs one bit into observedSiblingsMask -- it never touches
-// NNNode's input buffer -- so an address-only marker releases this node's turn
-// without fabricating any value or corrupting anyone's weighted sum.
-//
-// Transmitting out of order is safe: turn-taking exists to stagger access to a
-// shared medium, and NNInputBuffer is keyed by sender id, so arrival order is
-// irrelevant to correctness. Late-and-correct beats deadlocked.
+
 void releaseTurn() {
     const NNNodeConfig&   cfg = agent.getNodeConfig();
     const NNWindowConfig& win = agent.getWindowConfig();
@@ -306,10 +215,8 @@ void maybeReleaseStalledTurn() {
     turnStallArmed = false;
 }
 
-// ---------------------------------------------------------------------------
-// Pass lifecycle
-// ---------------------------------------------------------------------------
-// Only called from maybeClosePass(), which has already checked passManaged.
+
+
 bool passResolved() {
     if (!ownOutputSent) return false;
     if (standby == nullptr) return true;
@@ -317,10 +224,10 @@ bool passResolved() {
 }
 
 void closePass(const char* reason) {
-    runtimeScheduler->resetForNextPass();   // also resets the NNNode's input buffer
+    runtimeScheduler->resetForNextPass();   
     if (standby) standby->resetForNextPass();
     responder->resetForNextPass();
-    suppressor.reset();                     // NOTE: reset(), NOT resetForNextPass()
+    suppressor.reset();                     
 
     ownOutputSent      = false;
     myOutputValue      = 0.0f;
@@ -338,29 +245,19 @@ void maybeClosePass() {
     if (!passManaged) return;
     if (passResolved()) { closePass("resolved"); return; }
 
-    // Backstop: something never arrived. Close anyway so the next Run isn't
-    // stuck behind a half-finished pass.
+  
     if ((long)(millis() - lastActivityMs) >= (long)NN_PASS_IDLE_MS) {
         closePass(ownOutputSent ? "idle timeout" : "stalled -- never transmitted");
     }
 }
 
-// ---------------------------------------------------------------------------
+
 // Runtime
-// ---------------------------------------------------------------------------
 void startRuntime() {
     const NNNodeConfig&   cfg = agent.getNodeConfig();
     const NNWindowConfig& win = agent.getWindowConfig();
 
-    // Siblings broadcast their output to the NEXT layer's group (their
-    // successorLayerId), never to their own -- so a node that needs to watch its
-    // siblings has to join that group too, observation-only.
-    //
-    // Gating this on precedingSiblingsMask alone would be wrong for a backup
-    // node in transmit slot 0: its mask is 0, so it would never join, never
-    // observe its target, and NNBackupStandby's targetObserved would stay
-    // false -- making it substitute for a perfectly healthy sibling on every
-    // single pass. A backup role needs the group regardless of slot.
+
     bool needSiblings = (win.precedingSiblingsMask != 0) || cfg.hasBackupRole;
     uint8_t siblingGroup = needSiblings ? cfg.successorLayerId : NN_NO_SIBLING_GROUP;
 
@@ -383,19 +280,13 @@ void startRuntime() {
     responder        = new NNResendResponder(cfg.address);  // takes NNAddress by value
 
     if (cfg.hasBackupRole) {
-        // NNBackupStandby's constructor asserts the target is a same-layer
-        // sibling. Arduino builds normally leave NDEBUG undefined, so a bad
-        // config would abort() the board with no explanation. device_manifest.py
-        // already rejects this laptop-side, so this can only fire on a
-        // hand-edited manifest -- which is exactly the case worth surviving.
+      
         if (cfg.backupTargetAddress.layerId != cfg.address.layerId) {
             Serial.println("[Failover] REFUSING backup role: target is not a sibling in this layer.");
         } else if (cfg.layerRosterMask == 0) {
             Serial.println("[Failover] REFUSING backup role: layerRosterMask is 0.");
         } else {
-            // MUST bind to agent.getNodeConfig(): NNBackupStandby stores the
-            // config BY REFERENCE (unlike NNNode, which copies). A local
-            // NNNodeConfig here would dangle the moment this function returns.
+
             standby = new NNBackupStandby(agent.getNodeConfig(), clockMs);
 
             Serial.print("[Failover] backup duty for L");
@@ -407,11 +298,7 @@ void startRuntime() {
     }
 
     if (cfg.predecessorMask == 0) {
-        // A real physical input-layer node: its value was pushed at provisioning
-        // time (INPUT_VALUE, deliberately separate from bias), so it fires once
-        // and is never reset -- resetting would clear the seed and, since
-        // readyToExecute() is trivially true for an empty predecessorMask, it
-        // would then emit activation(bias) forever.
+  
         passManaged = false;
         if (agent.hasSeedInputValue()) {
             Serial.print("[Failover] predecessorMask==0 -- seeding input value ");
@@ -439,16 +326,9 @@ void runRuntimeStep() {
         NNAddress src = decodeAddress(pkt.header.sourceAddress);
         lastActivityMs = millis();
 
-        // NNDuplicateSuppressor locks a slot by src.nodeId ALONE, ignoring
-        // layerId. This socket carries both this node's predecessor layer and
-        // (when joined) the sibling-observation group, so an unfiltered
-        // suppressor would let a substitute for sibling nodeId k lock out a
-        // genuine predecessor packet from a different layer that reuses id k.
-        // Only gate the traffic it exists to protect: real predecessor inputs.
+     
         if (src.layerId == cfg.predecessorLayerId && !suppressor.shouldAccept(pkt)) {
-            // Logged once per pass, not per frame: a substitute is itself sent
-            // NN_DATA_RETRANSMITS times, so its own copies land here too, and
-            // Serial.print blocks this drain loop during the recovery window.
+           
             if (!loggedSuppression) {
                 loggedSuppression = true;
                 Serial.println("[Failover] a substitute claimed a slot -- further packets "
@@ -472,9 +352,7 @@ void runRuntimeStep() {
                 }
             }
         } else if (pkt.header.type == NNPacketType::CONTROL) {
-            // This is the RUNTIME socket. Setup-phase CONTROL packets carry raw
-            // struct bytes reinterpreted as floats and would be garbage here --
-            // they can't reach us because setup lives on a different port.
+            
             responder->onPacketObserved(pkt, ownOutputSent, myOutputValue);
         } else if (pkt.header.type == NNPacketType::TEARDOWN) {
             Serial.print("[Failover] TEARDOWN observed from L"); Serial.print(src.layerId);
@@ -484,53 +362,30 @@ void runRuntimeStep() {
 
     runtimeScheduler->tick();
 
-    // [F1] Only tick the standby once this node's OWN predecessor inputs are
-    // complete -- i.e. the round has genuinely started.
-    //
-    // NNBackupStandby::tick() treats "every bit in othersMask observed" as
-    // "the round finished". In a 2-node layer othersMask is 0, so that test
-    // passes on the very first tick, before any input exists. resendGraceMs
-    // later its input buffer is still empty, so it takes the no-recovery branch
-    // and broadcasts a TEARDOWN seconds after START -- before the user has even
-    // clicked Run.
-    //
-    // Leaving WAITING_FOR_INPUT means readyToExecute() returned true, so this
-    // node's predecessor set is complete. Siblings share predecessors, so the
-    // standby's own mirrored input buffer is complete at that same moment --
-    // which turns that spurious teardown into a correct SUBSTITUTE and leaves
-    // TEARDOWN meaning what it should: the inputs really are missing.
+ 
     if (standby && runtimeScheduler->getState() != NNNodeState::WAITING_FOR_INPUT) {
         standby->tick();
     }
 
-    maybeReleaseStalledTurn();   // [F2]
+    maybeReleaseStalledTurn();  
 
     NNPacket outPkt{};
 
-    // --- 1. this node's own output ---
+    //this node's own output
     if (runtimeScheduler->hasOutputReady(outPkt)) {
-        // The ONLY moment this node's output value is observable -- NNNode has
-        // no getter, and NNResendResponder needs it to answer a resend request.
+      
         myOutputValue = outPkt.payload[0];
         ownOutputSent = true;
         sendAndRetransmit(outPkt, cfg.successorLayerId, RETX_OWN_OUTPUT, "own output");
-        // Deliberately NOT resetting here -- see note 1 at the top of the file.
+       
     }
 
-    // --- 2. the failover REPORT for the laptop ---
-    // NNBackupStandby queues this itself, in the same function that decides to
-    // substitute or tear down, so its flag always matches the action it describes.
-    // Drained BEFORE the substitute below so the report is ahead on the wire of the
-    // result it explains -- belt and braces, since the client also drains briefly
-    // after collecting its outputs. Sent quietly; logged once the substitute is away.
+    // the failover REPORT for the laptop 
     if (standby && standby->hasDiagnosticReady(outPkt)) {
         sendAndRetransmit(outPkt, NN_DIAG_LAYER_GROUP, RETX_REPORT, /*what=*/nullptr);
     }
 
-    // --- 3. backup standby: resend request, then substitute OR teardown ---
-    // All three come out of the same channel, one at a time; classify with the
-    // did*() flags, which are set by the builders before the packet is handed
-    // over. Check the terminal outcomes first -- the else branch is the request.
+    // backup standby: resend request, then substitute OR teardown 
     if (standby && standby->hasOutputReady(outPkt)) {
         if (standby->didSubstitute()) {
             Serial.print("[Failover] grace expired, target still SILENT -> SUBSTITUTE = ");
@@ -559,7 +414,7 @@ void runRuntimeStep() {
         }
     }
 
-    // --- 4. we are the node someone asked to retransmit ---
+   
     if (responder->hasResendReady(outPkt)) {
         Serial.print("[Failover] answering a resend request for myself -> ");
         Serial.println(outPkt.payload[0], 6);
@@ -570,7 +425,7 @@ void runRuntimeStep() {
     maybeClosePass();
 }
 
-// ---------------------------------------------------------------------------
+
 
 void setup() {
     Serial.begin(115200);
@@ -617,13 +472,7 @@ void loop() {
         return;
     }
 
-    // Keep draining the setup socket so its receive buffer can't fill up, but
-    // DISCARD everything. Continuing to feed agent.onSetupPacket() once RUNNING
-    // would be unsafe: handleAssignAddress() checks only the hardwareId and has
-    // no state guard, so a stray or replayed ASSIGN_ADDRESS would rewrite
-    // nodeConfig.address at any time -- and because NNBackupStandby holds that
-    // same config BY REFERENCE, the change would land live inside a running
-    // standby.
+    
     NNPacket discard{};
     while (setupTransport.receive(discard)) { /* intentionally dropped */ }
 

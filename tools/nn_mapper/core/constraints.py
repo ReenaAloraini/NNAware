@@ -1,12 +1,5 @@
-"""Validate a mapped topology against limits imposed by the NNAware library itself.
+## Validate a mapped topology against limits imposed by the NNAware library itself.
 
-These aren't tunable mapper parameters — they're hard ceilings baked into the
-library's wire format and structs:
-  - NNAddress: node_id/layer_id/cluster_id/reserved are each 4-bit fields (0-15).
-  - predecessorMask is a uint16_t -> at most 16 predecessors per node.
-  - NN_MAX_PAYLOAD_FLOATS = 16 caps a single NNPacket's payload (not binding
-    in v1: every node emits exactly one float).
-"""
 from __future__ import annotations
 
 from typing import Dict, List, Optional
