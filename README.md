@@ -60,6 +60,7 @@ It is a localy hosted web application with four sections:
 |---|---|
 | `src/` | The framework core modules (node, scheduler, packet format, transports, failover) |
 | `examples/Device_Setup/` | Device firmware  |
+| `experiments_models/` | Pre-trained models used to test the framework on real hardware  |
 | `tools/nn_mapper/` | Streamlit app: map a model onto devices, provision, run |
 | `tools/nn_setup/` | Command-line provisioning toolchain |
 | `desktop_tests/`, `python_tests/` | C++ and Python test suites |
